@@ -1,0 +1,9 @@
+transformers>=4.51.3
+accelerate>=0.30.0
+qwen-vl-utils==0.0.8
+torch>=2.1
+scikit-learn>=1.1
+pillow
+numpy
+rich
+torchvision
