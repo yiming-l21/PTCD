@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 定义要处理的数据集列表
-DATASETS=("t2017" "t2015" "mvsa-s" "mvsa-m")
+DATASETS=("tumemo" "masad" "mvsa-s" "mvsa-m" "t2017" "t2015")
 
 # python -m venv .venv && source .venv/bin/activate
 

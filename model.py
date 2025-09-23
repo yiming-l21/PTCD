@@ -64,6 +64,60 @@ def build_messages(instruction: str, use_image: bool, img_path: str | None, user
         user_content = [{"type": "text", "text": user_text}]
     return [system_msg, {"role": "user", "content": user_content}]
 
+def chunked(it, n):
+    it = list(it)
+    for i in range(0, len(it), n):
+        yield it[i:i+n]
+
+
+def run_batch(model, processor, messages_list, max_new_tokens: int, temperature: float, top_p: float) -> List[str]:
+    texts, images_batch, videos_batch = [], [], []
+    for msgs in messages_list:
+        t = processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(msgs) 
+        texts.append(t)
+        images_batch.append(image_inputs if image_inputs else None)  
+        videos_batch.append(video_inputs if video_inputs else None)  
+
+    has_any_images = any(x is not None for x in images_batch)
+    has_any_videos = any(x is not None for x in videos_batch)
+
+    proc_kwargs = dict(
+        text=texts,
+        padding=True,
+        return_tensors='pt',
+    )
+    if has_any_images:
+        proc_kwargs['images'] = images_batch
+    if has_any_videos:
+        proc_kwargs['videos'] = videos_batch
+
+    inputs = processor(**proc_kwargs).to(model.device)
+
+    do_sample = True if temperature and temperature > 0 else False
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample
+        )
+
+
+    attn = inputs.get('attention_mask', None)
+    if attn is None:
+        cut = inputs.input_ids.shape[1]
+        gens = [out[i][cut:] for i in range(out.shape[0])]
+    else:
+        in_lens = attn.sum(dim=1)  # [B]
+        gens = [out[i][in_lens[i]:] for i in range(out.shape[0])]
+
+    return [
+        processor.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        for g in gens
+    ]
+
 def run_one(model, processor, messages, max_new_tokens: int, temperature: float, top_p: float) -> str:
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
@@ -98,24 +152,39 @@ def main():
     use_image_flag = (args.img_dir is not None) and (not args.no_img)
     has_aspect = getattr(args, 'has_aspect', True if 'fine' in str(tmpl).lower() else ('t2015' in dataset_name or 't2017' in dataset_name or 'masad' in dataset_name))
     instruction = build_instruction(labels=label_space, use_image=use_image_flag, has_aspect=has_aspect)
-
+    batch_size = getattr(args, 'batch_size', 8)
     gts, preds = [], []
+    gts = [label_map[s.label] for s in samples]
     t0 = time.time()
-    for s in track(samples, description='Inferring'):
-        gts.append(label_map[s.label])
+    for group in track(list(chunked(samples, batch_size)), description='Inferring (batched)'):
+        messages_list = []
+        meta_idx = []  
 
-        img_path = None
-        if use_image_flag and s.img_id:
-            cand = args.img_dir / s.img_id
-            if cand.exists():
-                img_path = cand  
+        for s in group:
+            img_path = None
+            if use_image_flag and s.img_id:
+                cand = args.img_dir / s.img_id
+                if cand.exists():
+                    img_path = cand
 
-        user_text = build_user_content(s.text_s, getattr(s, 'text_a', None), has_aspect=has_aspect)
-        messages = build_messages(instruction, use_image_flag and (img_path is not None),
-                                  str(img_path) if img_path is not None else None, user_text)
-        raw = run_one(model, processor, messages, args.max_new_tokens, args.temperature, args.top_p)
-        pred = parse_label_from_output(raw, label_space)
-        preds.append(pred)
+            user_text = build_user_content(s.text_s, getattr(s, 'text_a', None), has_aspect=has_aspect)
+            msgs = build_messages(
+                instruction=instruction,
+                use_image=use_image_flag and (img_path is not None),
+                img_path=str(img_path) if img_path is not None else None,
+                user_text=user_text
+            )
+            messages_list.append(msgs)
+
+        raws = run_batch(
+            model, processor, messages_list,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p
+        )
+
+        for raw in raws:
+            preds.append(parse_label_from_output(raw, label_space))
     acc = accuracy_score(gts, preds)
     f1_mac = f1_score(gts, preds, average='macro')
     f1_wtd = f1_score(gts, preds, average='weighted')
