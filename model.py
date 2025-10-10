@@ -183,7 +183,7 @@ def iter_with_clean_progress(
     console = Console(force_terminal=True, color_system=None, no_color=True, emoji=False)
     columns = [
         TextColumn(f"Rank {rank}"),
-        BarColumn(bar_width=None, pulse=False),
+        BarColumn(bar_width=None),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
@@ -252,7 +252,17 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         args, "has_aspect",
         True if "fine" in str(tmpl).lower() else ("t2015" in dataset_name or "t2017" in dataset_name or "masad" in dataset_name)
     )
-    instruction = build_instruction(labels=label_space, use_image=use_image_flag, has_aspect=has_aspect)
+    # Determine template variant
+    tpl_from_args = getattr(args, "template_variant", None)
+    template_variant = (str(tpl_from_args).strip().upper() if tpl_from_args
+                        else os.getenv("PROMPT_VARIANT", "STRICT").strip().upper())
+    allowed_tpls = {"STRICT","IMAGE_FIRST","TEXT_FIRST","CONFLICT_AWARE","SARCASM_AWARE"}
+    if template_variant not in allowed_tpls:
+        if os.getenv("PROMPT_VARIANT") or tpl_from_args:
+            print(f"[warn] unknown template_variant={template_variant}, fallback to STRICT", flush=True)
+        template_variant = "STRICT"
+    print(f"[*] using template variant: {template_variant}", flush=True)
+    instruction = build_instruction(labels=label_space, use_image=use_image_flag, has_aspect=has_aspect,template_variant=template_variant)
 
     local_results: List[Tuple[int, str]] = []
     local_gts: List[Tuple[int, str]] = []
@@ -314,13 +324,15 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         _finalize_and_save(preds, gts, raws)
 
 def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[int, str]]):
+    suffix = os.getenv("PROMPT_VARIANT", "STRICT").strip().upper()
+
     acc = accuracy_score(gts, preds)
     f1_mac = f1_score(gts, preds, average="macro")
     f1_wtd = f1_score(gts, preds, average="weighted")
-    print(f"[Test] size={len(gts)} Acc={acc:.4f} Macro-F1={f1_mac:.4f} Weighted-F1={f1_wtd:.4f}")
+    print(f"[Test:{suffix}] size={len(gts)} Acc={acc:.4f} Macro-F1={f1_mac:.4f} Weighted-F1={f1_wtd:.4f}")
 
     out_dir = Path("."); out_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = out_dir / "out_qwen2_5_vl_preds.txt"
+    pred_path = out_dir / f"out_qwen2_5_vl_preds_{suffix}.txt"      # NEW
     with pred_path.open("w", encoding="utf-8") as f:
         f.write("#True\t#Pred\n")
         for y, y_ in zip(gts, preds):
@@ -328,7 +340,7 @@ def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[
     print(f"[*] saved -> {pred_path.resolve()}")
 
     if raws:
-        raw_path = out_dir / "raw_generations.jsonl"
+        raw_path = out_dir / f"raw_generations_{suffix}.jsonl"      # NEW
         with raw_path.open("w", encoding="utf-8") as f:
             for item in raws:
                 if isinstance(item, tuple):
@@ -337,6 +349,7 @@ def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[
                     idx, txt = -1, item
                 f.write(json.dumps({"index": idx, "text": txt}, ensure_ascii=False) + "\n")
         print(f"[*] saved -> {raw_path.resolve()}")
+
 
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

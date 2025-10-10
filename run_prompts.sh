@@ -30,26 +30,28 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 
 DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
-
+VARIANTS=("IMAGE_FIRST" "TEXT_FIRST" "CONFLICT_AWARE" "SARCASM_AWARE" "STRICT")
 
 for dataset in "${DATASETS[@]}"; do
     echo "start processing dataset: ${dataset}"
+    for variant in "${VARIANTS[@]}"; do
+      export PROMPT_VARIANT="${variant}"
+      python model.py \
+          --data_dir "datasets/${dataset}" \
+          --img_dir "datasets/${dataset}/imgs" \
+          --tsv "test.tsv" \
+          --labels "positive,neutral,negative" \
+          --model "/home/lym/models/qwen2.5_vl" \
+          --dtype "bf16" \
+          --attn_impl "sdpa" \
+          --lang "en" \
+          --max_new_tokens 16 \
+          --distributed \
+          --dump_raw \
 
-    python model.py \
-        --data_dir "datasets/${dataset}" \
-        --img_dir "datasets/${dataset}/imgs" \
-        --tsv "test.tsv" \
-        --labels "positive,neutral,negative" \
-        --model "/home/lym/models/qwen2.5_vl" \
-        --dtype "bf16" \
-        --attn_impl "sdpa" \
-        --lang "en" \
-        --max_new_tokens 16 \
-        --distributed \
-        --dump_raw \
-
-    echo "dataset ${dataset} processed."
-    echo "----------------------------------------"
+      echo "dataset ${dataset} processed."
+      echo "----------------------------------------"
+    done
 done
 
 echo "All datasets processed."
