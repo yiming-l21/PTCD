@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+export CUDA_VISIBLE_DEVICES=2,4,5,6,7
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
 detect_gpus() {

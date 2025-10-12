@@ -9,7 +9,7 @@ import socket
 from time import monotonic
 from pathlib import Path
 from typing import List, Tuple
-
+from ensemble import _majority_vote
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score
 import torch
@@ -96,7 +96,8 @@ def parse_label_from_output(raw: str, label_space: List[str]) -> str:
         pat = rf"\b{re.escape(cand.lower())}\b"
         if re.search(pat, low_out):
             return cand
-    return "neutral" if any(c.lower() == "neutral" for c in label_space) else label_space[0]
+    # 兜底：固定选 label_space[0]
+    return label_space[0]
 
 def build_messages(instruction: str, use_image: bool, img_path: str | None, user_text: str):
     system_msg = {"role": "system", "content": instruction}
@@ -252,17 +253,29 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         args, "has_aspect",
         True if "fine" in str(tmpl).lower() else ("t2015" in dataset_name or "t2017" in dataset_name or "masad" in dataset_name)
     )
-    # Determine template variant
+
+    # Determine template variant(s)
     tpl_from_args = getattr(args, "template_variant", None)
-    template_variant = (str(tpl_from_args).strip().upper() if tpl_from_args
-                        else os.getenv("PROMPT_VARIANT", "STRICT").strip().upper())
+    single_tpl = (str(tpl_from_args).strip().upper() if tpl_from_args
+                  else os.getenv("PROMPT_VARIANT", "STRICT").strip().upper())
     allowed_tpls = {"STRICT","IMAGE_FIRST","TEXT_FIRST","CONFLICT_AWARE","SARCASM_AWARE"}
-    if template_variant not in allowed_tpls:
-        if os.getenv("PROMPT_VARIANT") or tpl_from_args:
-            print(f"[warn] unknown template_variant={template_variant}, fallback to STRICT", flush=True)
-        template_variant = "STRICT"
-    print(f"[*] using template variant: {template_variant}", flush=True)
-    instruction = build_instruction(labels=label_space, use_image=use_image_flag, has_aspect=has_aspect,template_variant=template_variant)
+
+    ens_env = os.getenv("PROMPT_ENSEMBLE", "").strip()
+    if ens_env:
+        prompt_variants = [v.strip().upper() for v in ens_env.split(",") if v.strip()]
+    else:
+        prompt_variants = [single_tpl]
+
+    prompt_variants = [v for v in prompt_variants if v in allowed_tpls]
+    if not prompt_variants:
+        prompt_variants = ["STRICT"]
+
+    run_suffix = os.getenv("RUN_SUFFIX", "").strip()
+    if not run_suffix:
+        run_suffix = ("ENS_" + "-".join(prompt_variants)) if len(prompt_variants) > 1 else prompt_variants[0]
+    os.environ["RUN_SUFFIX"] = run_suffix
+
+    print(f"[*] using prompt variants: {prompt_variants}  (suffix={run_suffix})", flush=True)
 
     local_results: List[Tuple[int, str]] = []
     local_gts: List[Tuple[int, str]] = []
@@ -284,19 +297,58 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 img_path = cand
 
         user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect)
-        msgs = build_messages(
-            instruction=instruction,
-            use_image=use_image_flag and (img_path is not None),
-            img_path=str(img_path) if img_path is not None else None,
-            user_text=user_text,
-        )
-        raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
-        pred = parse_label_from_output(raw, label_space)
 
-        local_results.append((i, pred))
-        local_gts.append((i, label_map[s.label]))
-        if getattr(args, "dump_raw", False):
-            local_raws.append((i, raw))
+        if len(prompt_variants) == 1:
+            tpl = prompt_variants[0]
+            instruction = build_instruction(
+                labels=label_space,
+                use_image=use_image_flag and (img_path is not None),
+                has_aspect=has_aspect,
+                template_variant=tpl
+            )
+            msgs = build_messages(
+                instruction=instruction,
+                use_image=use_image_flag and (img_path is not None),
+                img_path=str(img_path) if img_path is not None else None,
+                user_text=user_text,
+            )
+            raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
+            pred = parse_label_from_output(raw, label_space)
+
+            local_results.append((i, pred))
+            local_gts.append((i, label_map[s.label]))
+            if getattr(args, "dump_raw", False):
+                local_raws.append((i, raw))
+        else:
+            per_tpl_preds = []
+            per_tpl_raws  = []
+            for tpl in prompt_variants:
+                instruction = build_instruction(
+                    labels=label_space,
+                    use_image=use_image_flag and (img_path is not None),
+                    has_aspect=has_aspect,
+                    template_variant=tpl
+                )
+                msgs = build_messages(
+                    instruction=instruction,
+                    use_image=use_image_flag and (img_path is not None),
+                    img_path=str(img_path) if img_path is not None else None,
+                    user_text=user_text,
+                )
+                raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
+                pred = parse_label_from_output(raw, label_space)
+                per_tpl_preds.append(pred)
+                if getattr(args, "dump_raw", False):
+                    per_tpl_raws.append({"tpl": tpl, "raw": raw})
+
+            final_pred = _majority_vote(per_tpl_preds, label_space)
+            local_results.append((i, final_pred))
+            local_gts.append((i, label_map[s.label]))
+            if getattr(args, "dump_raw", False):
+                local_raws.append((i, json.dumps(
+                    {"tpl_preds": per_tpl_preds, "tpl_raws": per_tpl_raws},
+                    ensure_ascii=False
+                )))
 
     # Collect results and evaluate
     if is_dist:
@@ -324,7 +376,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         _finalize_and_save(preds, gts, raws)
 
 def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[int, str]]):
-    suffix = os.getenv("PROMPT_VARIANT", "STRICT").strip().upper()
+    suffix = os.getenv("RUN_SUFFIX", "").strip() or os.getenv("PROMPT_VARIANT", "STRICT").strip().upper()
 
     acc = accuracy_score(gts, preds)
     f1_mac = f1_score(gts, preds, average="macro")
@@ -332,7 +384,7 @@ def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[
     print(f"[Test:{suffix}] size={len(gts)} Acc={acc:.4f} Macro-F1={f1_mac:.4f} Weighted-F1={f1_wtd:.4f}")
 
     out_dir = Path("."); out_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = out_dir / f"out_qwen2_5_vl_preds_{suffix}.txt"      # NEW
+    pred_path = out_dir / f"out_qwen2_5_vl_preds_{suffix}.txt"
     with pred_path.open("w", encoding="utf-8") as f:
         f.write("#True\t#Pred\n")
         for y, y_ in zip(gts, preds):
@@ -340,7 +392,7 @@ def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[
     print(f"[*] saved -> {pred_path.resolve()}")
 
     if raws:
-        raw_path = out_dir / f"raw_generations_{suffix}.jsonl"      # NEW
+        raw_path = out_dir / f"raw_generations_{suffix}.jsonl"
         with raw_path.open("w", encoding="utf-8") as f:
             for item in raws:
                 if isinstance(item, tuple):
@@ -349,7 +401,6 @@ def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[
                     idx, txt = -1, item
                 f.write(json.dumps({"index": idx, "text": txt}, ensure_ascii=False) + "\n")
         print(f"[*] saved -> {raw_path.resolve()}")
-
 
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
