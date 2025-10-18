@@ -29,15 +29,15 @@ export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 export USE_DEMO=1
-export DEMO_TOPK=1
-export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/mvsa-s/train_few1.json"
+export DEMO_TOPK=3
+export PRED_FIELD="pred_demo3"
 
 DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
 
 
 for dataset in "${DATASETS[@]}"; do
     echo "start processing dataset: ${dataset}"
-
+    export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
     python model.py \
         --data_dir "datasets/${dataset}" \
         --img_dir "datasets/${dataset}/imgs" \

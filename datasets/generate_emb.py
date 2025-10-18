@@ -34,8 +34,6 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     args = parser.parse_args()
     out_path = os.path.join(args.data_dir, f"{args.split}_{args.model_tag}.npy")
-    if Path(out_path).exists():
-        return 
     os.makedirs(args.data_dir, exist_ok=True)
     samples = read_jsonl(args.jsonl)
     texts = [ (s.get("text") or "").strip() for s in samples ]

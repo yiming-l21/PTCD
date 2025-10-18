@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import List, Tuple
 from ensemble import _majority_vote
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -23,6 +22,7 @@ from dataset import MSADataset
 from prompts import build_instruction, build_user_content
 from utils import get_labels_and_template
 from retrieve_demo import ExampleBank, format_fewshot_block, read_train_items, build_demo_messages
+from logs.logs import _finalize_and_save,_resolve_pred_field,_write_rag_debug_and_stats
 # ---------------- Logging / Environment ----------------
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from transformers.utils import logging as hf_logging  # noqa: E402
@@ -71,6 +71,19 @@ def load_model_and_processor(
         tok.pad_token = tok.eos_token
     model.generation_config.pad_token_id = tok.pad_token_id
     return model, processor
+
+def _to_jsonable(x):
+    if isinstance(x, (np.floating, np.integer)):
+        return x.item()
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    if isinstance(x, Path):
+        return str(x)
+    if isinstance(x, dict):
+        return {k: _to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_to_jsonable(v) for v in x]
+    return x
 
 def _first_json(text: str) -> dict | None:
     m = re.search(r"\{[\s\S]*?\}", text)
@@ -230,7 +243,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     tsv_path = args.data_dir / args.tsv
     reader = MSADataset(args, Path(tsv_path), dataset_name=dataset_name)
     samples = reader.read()
-
+    samples_meta = reader.get_samples_meta()
     # Model & Processor
     use_fast = getattr(args, "use_fast_processor", True)
     model, processor = load_model_and_processor(
@@ -278,9 +291,12 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     train_items = read_train_items(train_jsonl_path) if use_demo else []
     prefix = f"{split_name}2train_{emb_tag}"
     demo_index_path = Path(args.data_dir) / f"{prefix}_top10_idx.npy"
+    demo_sim_path = Path(args.data_dir) / f"{prefix}_top10_sim.npy"
     demo_index = None
+    demo_sim = None
     if use_demo and demo_index_path.exists():
         demo_index = np.load(str(demo_index_path))  # (N_split, K_big)
+        demo_sim = np.load(str(demo_sim_path))
         print(f"[*] Loaded demo index: {demo_index_path}  shape={demo_index.shape}", flush=True)
     elif use_demo:
         print(f"[warn] USE_DEMO=TRUE but DEMO_INDEX not found: {demo_index_path}", flush=True)
@@ -288,7 +304,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     local_results: List[Tuple[int, str]] = []
     local_gts: List[Tuple[int, str]] = []
     local_raws: List[Tuple[int, str]] = []
-
+    demo_diags_by_idx = {}
     # Main inference loop
     for i in iter_with_clean_progress(
         samples, rank, world_size, is_dist,
@@ -305,28 +321,50 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 img_path = cand
 
         user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect)
-        # build demos from offline index
+        # ---------- build demos from offline index + diagnostics----------
         prefix_demo_msgs = []
+        demo_diag = {"demos": []}
         if use_demo and (demo_index is not None) and (len(train_items) > 0):
-            q_idx = i
-            if q_idx < demo_index.shape[0]:
-                ids = demo_index[i]
+            row = i
+            if (row is not None) and (0 <= row < demo_index.shape[0]):
+                ids = demo_index[row]
+                sims = demo_sim[row]
                 k = min(int(demo_topk), ids.shape[-1])
                 demos = []
-                for j in ids[:k]:
-                    j = int(j)
-                    if j < 0 or j >= len(train_items):
-                        continue
-                    it = train_items[j]
-                    imgp = None
-                    if it.get("image"):
-                        cand = it["image"]
-                        if Path(cand).exists():
-                            imgp = cand
-                    demos.append({"text": it["text"], "label": it["label"], "image": imgp})
+
+                for m in range(k):
+                    j = int(ids[m])
+                    print(j,len(train_items))
+                    if 0 <= j < len(train_items):
+                        it = train_items[j]
+                        d_text = it.get("text", "")
+                        d_label = it.get("label", "")
+                        imgp = None
+                        if it.get("image"):
+                            cand = it["image"]
+                            if Path(cand).exists():
+                                imgp = cand
+                        demos.append({
+                            "text": d_text,
+                            "label": d_label,
+                            "image": imgp,
+                            "sim": _to_jsonable(sims[m]),
+                            "train_id": j,
+                        })
                 if demos:
                     prefix_demo_msgs = build_demo_messages(demos)
-
+                    print(f"[*] Sample {i} get {len(demos)} demonstrations.")
+                    demo_diag["demos"] = [
+                        {
+                            "train_id": d["train_id"],
+                            "label": d["label"],
+                            "text": d["text"],
+                            "image": (d["image"] or ""),
+                            "sim": d["sim"],
+                        }
+                        for d in demos
+                    ]
+        demo_diags_by_idx[i] = demo_diag
         if len(prompt_variants) == 1:
             tpl = prompt_variants[0]
             instruction = build_instruction(
@@ -348,6 +386,8 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
             pred = parse_label_from_output(raw, label_space)
 
             local_results.append((i, pred))
+            demo_diags_by_idx[i]["pred"] = pred
+            demo_diags_by_idx[i]["gold"] = label_map[s.label]
             local_gts.append((i, label_map[s.label]))
             if getattr(args, "dump_raw", False):
                 local_raws.append((i, raw))
@@ -378,6 +418,9 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
 
             final_pred = _majority_vote(per_tpl_preds, label_space)
             local_results.append((i, final_pred))
+            demo_diags_by_idx[i]["pred"] = pred
+            demo_diags_by_idx[i]["gold"] = label_map[s.label]
+            demo_diags_by_idx[i]["tpl_preds"] = per_tpl_preds
             local_gts.append((i, label_map[s.label]))
             if getattr(args, "dump_raw", False):
                 local_raws.append((i, json.dumps(
@@ -386,56 +429,36 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 )))
 
     # Collect results and evaluate
+    pred_field = _resolve_pred_field()
     if is_dist:
-        pack = {"preds": local_results, "gts": local_gts, "raws": local_raws}
+        pack = {"preds": local_results, "gts": local_gts, "raws": local_raws, "diag":  demo_diags_by_idx,}
         gathered = [None for _ in range(world_size)]
         dist.all_gather_object(gathered, pack)
 
         if rank == 0:
             all_pred, all_gt, all_raw = [], [], []
+            merged_diag = {}  
             for p in gathered:
                 all_pred.extend(p["preds"]); all_gt.extend(p["gts"]); all_raw.extend(p["raws"])
+                for k, v in p.get("diag", {}).items():
+                    merged_diag[k] = v
             all_pred.sort(key=lambda x: x[0]); all_gt.sort(key=lambda x: x[0]); all_raw.sort(key=lambda x: x[0])
 
             preds = [p for _, p in all_pred]
             gts   = [g for _, g in all_gt]
             raws  = [r for _, r in all_raw]
-            _finalize_and_save(preds, gts, raws)
-
+            _finalize_and_save(preds, gts, raws, dataset_name, samples_meta, pred_field)
+            if use_demo:
+                _write_rag_debug_and_stats(dataset_name, pred_field, samples_meta, merged_diag, preds, gts)
         dist.barrier()
         dist.destroy_process_group()
     else:
         preds = [p for _, p in sorted(local_results, key=lambda x: x[0])]
         gts   = [g for _, g in sorted(local_gts,     key=lambda x: x[0])]
         raws  = [r for _, r in sorted(local_raws,    key=lambda x: x[0])] if getattr(args, "dump_raw", False) else []
-        _finalize_and_save(preds, gts, raws)
-
-def _finalize_and_save(preds: List[str], gts: List[str], raws: List[str | Tuple[int, str]]):
-    suffix = os.getenv("RUN_SUFFIX", "").strip() or os.getenv("PROMPT_VARIANT", "STRICT").strip().upper()
-
-    acc = accuracy_score(gts, preds)
-    f1_mac = f1_score(gts, preds, average="macro")
-    f1_wtd = f1_score(gts, preds, average="weighted")
-    print(f"[Test:{suffix}] size={len(gts)} Acc={acc:.4f} Macro-F1={f1_mac:.4f} Weighted-F1={f1_wtd:.4f}")
-
-    out_dir = Path("."); out_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = out_dir / f"out_qwen2_5_vl_preds_{suffix}.txt"
-    with pred_path.open("w", encoding="utf-8") as f:
-        f.write("#True\t#Pred\n")
-        for y, y_ in zip(gts, preds):
-            f.write(f"{y}\t{y_}\n")
-    print(f"[*] saved -> {pred_path.resolve()}")
-
-    if raws:
-        raw_path = out_dir / f"raw_generations_{suffix}.jsonl"
-        with raw_path.open("w", encoding="utf-8") as f:
-            for item in raws:
-                if isinstance(item, tuple):
-                    idx, txt = item
-                else:
-                    idx, txt = -1, item
-                f.write(json.dumps({"index": idx, "text": txt}, ensure_ascii=False) + "\n")
-        print(f"[*] saved -> {raw_path.resolve()}")
+        _finalize_and_save(preds, gts, raws, dataset_name, samples_meta, pred_field)
+        if use_demo:
+            _write_rag_debug_and_stats(dataset_name, pred_field, samples_meta, demo_diags_by_idx, preds, gts)
 
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

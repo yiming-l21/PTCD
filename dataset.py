@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Iterable, Optional
 import csv
 import os
 import torch
@@ -96,3 +96,76 @@ class MSADataset(Dataset):
             "text_s": text_s,
             "text_a": text_a
         }
+    _samples_meta_cache: Optional[List[Dict]] = None
+    def _build_samples_meta(
+        self,
+        *,
+        abs_image_path: bool = True,
+        join_text_with_aspect: bool = True,
+    ) -> List[Dict]:
+        metas: List[Dict] = []
+        for idx, line in enumerate(self.lines):
+            # id：优先用第 0 列；若缺失则回退到图片名 stem；最终回退 idx
+            sid = (str(line[0]).strip() if len(line) > 0 and str(line[0]).strip() else None)
+
+            label = line[1].strip() if len(line) > 1 else ""
+            img_id = line[2].strip() if len(line) > 2 and line[2].strip() != "" else None
+
+            text_s = (line[3] if len(line) > 3 else "")
+            text_a = (line[4] if len(line) > 4 else "")
+
+            if self.dataset in ['t2015', 't2017']:
+                text_s = text_s.replace('$t$', text_a)
+
+            if join_text_with_aspect and text_a.strip():
+                text = f"{text_s} || {text_a}"
+            else:
+                text = text_s
+            if img_id:
+                if self.img_dir is not None:
+                    img_path = (self.img_dir / img_id)
+                else:
+                    img_path = Path(img_id)
+                image_str = str(img_path.resolve()) if abs_image_path else str(img_path)
+            else:
+                image_str = ""
+            if sid is None:
+                if img_id:
+                    sid = Path(img_id).stem
+                else:
+                    sid = str(idx)
+
+            metas.append({
+                "id": str(sid),
+                "text": text,
+                "image": image_str,
+                "caption": "",    
+                "label": label,
+            })
+        return metas
+
+    def get_samples_meta(
+        self,
+        *,
+        abs_image_path: bool = True,
+        join_text_with_aspect: bool = True,
+        use_cache: bool = True,
+    ) -> List[Dict]:
+        if use_cache and self._samples_meta_cache is not None:
+            return self._samples_meta_cache
+
+        metas = self._build_samples_meta(
+            abs_image_path=abs_image_path,
+            join_text_with_aspect=join_text_with_aspect,
+        )
+        if use_cache and abs_image_path and join_text_with_aspect:
+            self._samples_meta_cache = metas
+        return metas
+
+    def get_sample_meta_by_index(self, idx: int) -> Dict:
+        metas = self.get_samples_meta()
+        return metas[idx]
+
+    @property
+    def samples_meta(self) -> List[Dict]:
+        return self.get_samples_meta()

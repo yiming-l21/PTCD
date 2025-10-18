@@ -83,7 +83,13 @@ def parse_row_fine(row):
 
 def convert(tsv_path: Path, out_path: Path, image_base: Path, mode: str):
     with tsv_path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.reader(f, delimiter="\t")
+        reader = csv.reader(
+                f,
+                delimiter="\t",
+                quoting=csv.QUOTE_NONE,  
+                escapechar="\\",
+                strict=False,
+            )
 
         try:
             first = next(reader)
@@ -132,8 +138,6 @@ def main():
     image_base = Path(f"/home/lym/VLM-MSA/datasets/{dataset_name}/imgs")
     tsv = Path(f"/home/lym/VLM-MSA/datasets/{dataset_name}/{split}.tsv")
     out = Path(f"/home/lym/VLM-MSA/datasets/{dataset_name}/{split}.json")
-    if out.exists():
-        return 
     print(f"[*] dataset={dataset_name} mode={mode}")
     print(f"[*] tsv={tsv}")
     print(f"[*] out={out}")
