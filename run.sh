@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+export CUDA_VISIBLE_DEVICES=2,4,5,6,7
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
 detect_gpus() {
@@ -28,6 +28,9 @@ export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
+export USE_DEMO=1
+export DEMO_TOPK=1
+export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/mvsa-s/train_few1.json"
 
 DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
 

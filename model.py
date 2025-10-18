@@ -22,7 +22,7 @@ from params import build_args, resolve_paths
 from dataset import MSADataset
 from prompts import build_instruction, build_user_content
 from utils import get_labels_and_template
-
+from retrieve_demo import ExampleBank, format_fewshot_block, read_train_items, build_demo_messages
 # ---------------- Logging / Environment ----------------
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from transformers.utils import logging as hf_logging  # noqa: E402
@@ -98,14 +98,6 @@ def parse_label_from_output(raw: str, label_space: List[str]) -> str:
             return cand
     # 兜底：固定选 label_space[0]
     return label_space[0]
-
-def build_messages(instruction: str, use_image: bool, img_path: str | None, user_text: str):
-    system_msg = {"role": "system", "content": instruction}
-    if use_image and img_path is not None:
-        user_content = [{"type": "image", "image": str(img_path)}, {"type": "text", "text": user_text}]
-    else:
-        user_content = [{"type": "text", "text": user_text}]
-    return [system_msg, {"role": "user", "content": user_content}]
 
 def run_one(model, processor, messages, max_new_tokens: int) -> str:
     """Single end-to-end generation (greedy decoding)."""
@@ -277,6 +269,22 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
 
     print(f"[*] using prompt variants: {prompt_variants}  (suffix={run_suffix})", flush=True)
 
+    # RAG inference
+    use_demo: bool = os.getenv("USE_DEMO", "0").strip().lower() in {"1", "true", "yes"}
+    demo_topk: int = int(os.getenv("DEMO_TOPK", "3"))
+    emb_tag = os.getenv("DEMO_EMB_TAG", "sbert-roberta-large").strip()
+    split_name = "test" if "test" in args.tsv else "val"
+    train_jsonl_path = Path(os.getenv("TRAIN_JSONL") or getattr(args, "train_jsonl", ""))
+    train_items = read_train_items(train_jsonl_path) if use_demo else []
+    prefix = f"{split_name}2train_{emb_tag}"
+    demo_index_path = Path(args.data_dir) / f"{prefix}_top10_idx.npy"
+    demo_index = None
+    if use_demo and demo_index_path.exists():
+        demo_index = np.load(str(demo_index_path))  # (N_split, K_big)
+        print(f"[*] Loaded demo index: {demo_index_path}  shape={demo_index.shape}", flush=True)
+    elif use_demo:
+        print(f"[warn] USE_DEMO=TRUE but DEMO_INDEX not found: {demo_index_path}", flush=True)
+
     local_results: List[Tuple[int, str]] = []
     local_gts: List[Tuple[int, str]] = []
     local_raws: List[Tuple[int, str]] = []
@@ -297,6 +305,27 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 img_path = cand
 
         user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect)
+        # build demos from offline index
+        prefix_demo_msgs = []
+        if use_demo and (demo_index is not None) and (len(train_items) > 0):
+            q_idx = i
+            if q_idx < demo_index.shape[0]:
+                ids = demo_index[i]
+                k = min(int(demo_topk), ids.shape[-1])
+                demos = []
+                for j in ids[:k]:
+                    j = int(j)
+                    if j < 0 or j >= len(train_items):
+                        continue
+                    it = train_items[j]
+                    imgp = None
+                    if it.get("image"):
+                        cand = it["image"]
+                        if Path(cand).exists():
+                            imgp = cand
+                    demos.append({"text": it["text"], "label": it["label"], "image": imgp})
+                if demos:
+                    prefix_demo_msgs = build_demo_messages(demos)
 
         if len(prompt_variants) == 1:
             tpl = prompt_variants[0]
@@ -306,12 +335,15 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 has_aspect=has_aspect,
                 template_variant=tpl
             )
-            msgs = build_messages(
-                instruction=instruction,
-                use_image=use_image_flag and (img_path is not None),
-                img_path=str(img_path) if img_path is not None else None,
-                user_text=user_text,
-            )
+            system_msg = {"role": "system", "content": instruction}
+            if use_image_flag and img_path is not None:
+                cur_user = {"role": "user", "content": [
+                    {"type": "image", "image": str(img_path)},
+                    {"type": "text", "text": user_text}
+                ]}
+            else:
+                cur_user = {"role": "user", "content": [{"type": "text", "text": user_text}]}
+            msgs = [system_msg] + prefix_demo_msgs + [cur_user]
             raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
             pred = parse_label_from_output(raw, label_space)
 
@@ -329,12 +361,15 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                     has_aspect=has_aspect,
                     template_variant=tpl
                 )
-                msgs = build_messages(
-                    instruction=instruction,
-                    use_image=use_image_flag and (img_path is not None),
-                    img_path=str(img_path) if img_path is not None else None,
-                    user_text=user_text,
-                )
+                system_msg = {"role": "system", "content": instruction}
+                if use_image_flag and img_path is not None:
+                    cur_user = {"role": "user", "content": [
+                        {"type": "image", "image": str(img_path)},
+                        {"type": "text", "text": user_text}
+                    ]}
+                else:
+                    cur_user = {"role": "user", "content": [{"type": "text", "text": user_text}]}
+                msgs = [system_msg] + prefix_demo_msgs + [cur_user]
                 raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
                 pred = parse_label_from_output(raw, label_space)
                 per_tpl_preds.append(pred)
