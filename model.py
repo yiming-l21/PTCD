@@ -21,7 +21,7 @@ from params import build_args, resolve_paths
 from dataset import MSADataset
 from prompts import build_instruction, build_user_content
 from utils import get_labels_and_template
-from retrieve_demo import ExampleBank, format_fewshot_block, read_train_items, build_demo_messages
+from retrieve_demo import read_train_items, build_demo_messages
 from logs.logs import _finalize_and_save,_resolve_pred_field,_write_rag_debug_and_stats
 # ---------------- Logging / Environment ----------------
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -241,7 +241,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     template_id = getattr(args, "template_id", 2)
     label_space, label_map, tmpl = get_labels_and_template(dataset_name, template_id)
     tsv_path = args.data_dir / args.tsv
-    reader = MSADataset(args, Path(tsv_path), dataset_name=dataset_name)
+    reader = MSADataset(args, Path(tsv_path), dataset_name=dataset_name, label_map=label_map)
     samples = reader.read()
     samples_meta = reader.get_samples_meta()
     # Model & Processor
@@ -288,7 +288,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     emb_tag = os.getenv("DEMO_EMB_TAG", "sbert-roberta-large").strip()
     split_name = "test" if "test" in args.tsv else "val"
     train_jsonl_path = Path(os.getenv("TRAIN_JSONL") or getattr(args, "train_jsonl", ""))
-    train_items = read_train_items(train_jsonl_path) if use_demo else []
+    train_items = read_train_items(train_jsonl_path,dataset_name=dataset_name,image_base=Path(args.data_dir) / "imgs",make_abs_path=True,use_aspect_line=True,replace_placeholder=True) if use_demo else []
     prefix = f"{split_name}2train_{emb_tag}"
     demo_index_path = Path(args.data_dir) / f"{prefix}_top10_idx.npy"
     demo_sim_path = Path(args.data_dir) / f"{prefix}_top10_sim.npy"
@@ -334,7 +334,6 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
 
                 for m in range(k):
                     j = int(ids[m])
-                    print(j,len(train_items))
                     if 0 <= j < len(train_items):
                         it = train_items[j]
                         d_text = it.get("text", "")
@@ -346,14 +345,13 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                                 imgp = cand
                         demos.append({
                             "text": d_text,
-                            "label": d_label,
+                            "label": label_map[d_label],
                             "image": imgp,
                             "sim": _to_jsonable(sims[m]),
                             "train_id": j,
                         })
                 if demos:
-                    prefix_demo_msgs = build_demo_messages(demos)
-                    print(f"[*] Sample {i} get {len(demos)} demonstrations.")
+                    prefix_demo_msgs = build_demo_messages(demos, dataset_name=dataset_name)
                     demo_diag["demos"] = [
                         {
                             "train_id": d["train_id"],
@@ -382,9 +380,9 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
             else:
                 cur_user = {"role": "user", "content": [{"type": "text", "text": user_text}]}
             msgs = [system_msg] + prefix_demo_msgs + [cur_user]
+            #print(msgs)
             raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
             pred = parse_label_from_output(raw, label_space)
-
             local_results.append((i, pred))
             demo_diags_by_idx[i]["pred"] = pred
             demo_diags_by_idx[i]["gold"] = label_map[s.label]

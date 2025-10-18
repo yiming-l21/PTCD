@@ -1,107 +1,106 @@
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import numpy as np
 import json
+import os
 
-class ExampleBank:
-    def __init__(self, train_jsonl_path: Path, train_emb_path: Path, train_img_dir: Path | None):
-        self.train_items = self._read_jsonl(train_jsonl_path)
-        self.train_emb = np.load(str(train_emb_path))  # (N_train, D)
-        self.img_dir = train_img_dir
-        assert len(self.train_items) == self.train_emb.shape[0], \
-            f"train_jsonl size {len(self.train_items)} != train_emb rows {self.train_emb.shape[0]}"
+COARSE = "coarse"
+FINE   = "fine"
 
-    @staticmethod
-    def _read_jsonl(p: Path):
-        items = []
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    txt = (obj.get("text") or obj.get("#3 String") or obj.get("content") or "").strip()
-                    lbl = (obj.get("label") or obj.get("#1 Label") or obj.get("sentiment") or "").strip()
-                    img = (obj.get("image") or obj.get("img_id") or obj.get("#2 ImageID") or "").strip()
-                    items.append({"text": txt, "label": lbl, "img": img})
-                except Exception:
-                    pass
+COARSE_DATASETS = {"mvsa-s", "mvsa-m", "tumemo", "tumblr"}
+FINE_DATASETS   = {"t2015", "t2017", "masad"}
+
+def dataset_mode(dataset_name: str) -> str:
+    name = (dataset_name or "").strip().lower()
+    if name in COARSE_DATASETS:
+        return COARSE
+    if name in FINE_DATASETS:
+        return FINE
+    return COARSE
+
+def _replace_placeholder(text: str, aspect: Optional[str]) -> str:
+    if not text: return ""
+    if not aspect: return text
+    return text.replace("$T$", aspect).replace("$t$", aspect)
+
+def _resolve_image_path(img: str, image_base: Optional[Path], make_abs: bool=True) -> str:
+    if not img: return ""
+    p = Path(img)
+    if not p.is_absolute() and image_base is not None:
+        p = image_base / img
+    if make_abs:
+        p = p.resolve()
+    return p.as_posix()
+
+def read_train_items(
+    p: Path,
+    *,
+    dataset_name: str = "",
+    image_base: Optional[Path] = None,
+    make_abs_path: bool = True,
+    use_aspect_line: bool = False,  
+    replace_placeholder: bool = True 
+) -> List[dict]:
+    items: List[dict] = []
+    mode = dataset_mode(dataset_name)
+
+    if not p or not p.exists():
+        print(f"[warn] TRAIN_JSONL not found: {p}", flush=True)
         return items
 
-    def _img_path(self, img_id: str | None) -> str | None:
-        if not img_id or not self.img_dir:
-            return None
-        cand = self.img_dir / img_id
-        return str(cand) if cand.exists() else None
-
-    def topk(self, query_vec: np.ndarray, k: int = 3, avoid_text: str | None = None):
-        sims = self.train_emb @ query_vec.astype(np.float32)  # 已 normalize => 点积即 cosine
-        idx = np.argpartition(-sims, kth=min(k*4, len(sims)-1))[:k*4]
-        idx = idx[np.argsort(-sims[idx])]
-        demos = []
-        seen_texts = set()
-        if avoid_text:
-            seen_texts.add(avoid_text.strip())
-        for j in idx:
-            it = self.train_items[j]
-            t = (it.get("text") or "").strip()
-            if (not t) or (t in seen_texts):
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line: 
                 continue
-            imgp = self._img_path(it.get("img"))
-            demos.append({"text": t, "label": (it.get("label") or "").strip(), "image": imgp})
-            seen_texts.add(t)
-            if len(demos) >= k:
-                break
-        return demos
+            try:
+                obj = json.loads(line)
+                txt = obj.get("text").strip()
+                lbl = obj.get("label").strip()
+                img = obj.get("image").strip()
+                asp = obj.get("aspect").strip()
 
+                if mode == FINE:
+                    if replace_placeholder and asp:
+                        txt = _replace_placeholder(txt, asp)
+                    if use_aspect_line and asp:
+                        text_for_demo = f"Text: {txt}\nAspect: {asp}\nReturn JSON only."
+                    else:
+                        text_for_demo = f"Text: {txt}\nReturn JSON only."
+                else:
+                    text_for_demo = f"Text: {txt}\nReturn JSON only."
 
-def format_fewshot_block(demos: List[dict]) -> str:
-    """
-    生成简短、明确且不干扰最终 JSON 的 few-shot 块。
-    """
-    lines = ["Few-shot examples (read only; do NOT explain):"]
-    for i, d in enumerate(demos, 1):
-        txt = (d.get("text") or "").replace("\n", " ").strip()
-        lbl = (d.get("label") or "").strip()
-        lines.append(f"{i}) Text: {txt}\n   Expected JSON: {{\"label\": \"{lbl}\"}}")
-    return "\n".join(lines)
+                img_path = _resolve_image_path(img, image_base=image_base, make_abs=make_abs_path)
 
-def read_train_items(p: Path):
-        items = []
-        if not p or not p.exists():
-            print(f"[warn] TRAIN_JSONL not found: {p}", flush=True)
-            return items
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line: 
-                    continue
-                try:
-                    obj = json.loads(line)
-                    txt = (obj.get("text") or obj.get("#3 String") or obj.get("content") or "").strip()
-                    lbl = (obj.get("label") or obj.get("#1 Label") or obj.get("sentiment") or "").strip()
-                    img = (obj.get("image") or obj.get("img_id") or obj.get("#2 ImageID") or "").strip()
-                    items.append({"text": txt, "label": lbl, "image": img})
-                except Exception:
-                    pass
-        return items
+                items.append({
+                    "text": text_for_demo,  
+                    "label": lbl,
+                    "image": img_path,
+                    "aspect": asp if mode == FINE else "",
+                })
+            except Exception as e:
+                continue
+    return items
 
-def build_demo_messages(demos: List[dict], has_aspect: bool = True) -> List[dict]:
-    msgs = []
+def build_demo_messages(
+    demos: List[dict],
+    *,
+    dataset_name: str = "",
+) -> List[dict]:
+    msgs: List[dict] = []
     for d in demos:
         txt = (d.get("text") or "").strip()
-        lbl = (d.get("label") or "").strip()
-        img = d.get("image", None)
+        lbl = d.get("label") or ""
+        img = d.get("image") or ""
+        # user
         if img:
             user_content = [
                 {"type": "image", "image": img},
-                {"type": "text", "text": f"Text: {txt}\nReturn JSON only."},
+                {"type": "text",  "text": txt},
             ]
         else:
-            user_content = [{"type": "text", "text": f"Text: {txt}\nReturn JSON only."}]
+            user_content = [{"type": "text", "text": txt}]
         assistant_content = [{"type": "text", "text": json.dumps({"label": lbl}, ensure_ascii=False)}]
-
         msgs.append({"role": "user", "content": user_content})
         msgs.append({"role": "assistant", "content": assistant_content})
     return msgs

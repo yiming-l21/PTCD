@@ -20,9 +20,10 @@ class Sample:
 
 class MSADataset(Dataset):
 
-    def __init__(self, args, tsv_path: Path, dataset_name: str = 't2015'):
+    def __init__(self, args, tsv_path: Path, dataset_name: str, label_map: Dict[str, str]):
         self.tsv_file = tsv_path
         self.dataset = dataset_name
+        self.label_map = label_map
         self.no_img = args.no_img
         self.data_dir = Path(args.data_dir)
         self.img_dir = None if args.img_dir is None else Path(args.img_dir)
@@ -140,7 +141,7 @@ class MSADataset(Dataset):
                 "text": text,
                 "image": image_str,
                 "caption": "",    
-                "label": label,
+                "label": self.label_map[label],
             })
         return metas
 
