@@ -28,17 +28,31 @@ export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
+
 export USE_DEMO=1
-export DEMO_TOPK=3
-export PRED_FIELD="pred_demo3"
 
 DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
 
+for k in 1 2; do
+  # topk=1 时两个模式等价，只跑 perclass；topk=2 时跑 perclass 和 balanced
+  if [ "$k" -eq 1 ]; then
+    MODES=("perclass")
+  else
+    MODES=("perclass" "balanced")
+  fi
 
-for dataset in "${DATASETS[@]}"; do
-    echo "start processing dataset: ${dataset}"
-    export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
-    python model.py \
+  for mode in "${MODES[@]}"; do
+    export DEMO_TOPK="$k"
+    export DEMO_MODE="$mode"
+    export PRED_FIELD="pred_demo${DEMO_TOPK}_${DEMO_MODE}"
+
+    echo "==== Running with DEMO_TOPK=${DEMO_TOPK}, DEMO_MODE=${DEMO_MODE} (PRED_FIELD=${PRED_FIELD}) ===="
+
+    for dataset in "${DATASETS[@]}"; do
+      echo "[start] dataset: ${dataset}"
+      export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
+
+      python model.py \
         --data_dir "datasets/${dataset}" \
         --img_dir "datasets/${dataset}/imgs" \
         --tsv "test.tsv" \
@@ -49,10 +63,15 @@ for dataset in "${DATASETS[@]}"; do
         --lang "en" \
         --max_new_tokens 16 \
         --distributed \
-        --dump_raw \
+        --dump_raw
 
-    echo "dataset ${dataset} processed."
-    echo "----------------------------------------"
+      echo "[done ] dataset: ${dataset}"
+      echo "----------------------------------------"
+    done
+
+    echo "==== Finished combo: DEMO_TOPK=${DEMO_TOPK}, DEMO_MODE=${DEMO_MODE} ===="
+    echo
+  done
 done
 
-echo "All datasets processed."
+echo "All runs completed."

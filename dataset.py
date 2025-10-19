@@ -106,7 +106,6 @@ class MSADataset(Dataset):
     ) -> List[Dict]:
         metas: List[Dict] = []
         for idx, line in enumerate(self.lines):
-            # id：优先用第 0 列；若缺失则回退到图片名 stem；最终回退 idx
             sid = (str(line[0]).strip() if len(line) > 0 and str(line[0]).strip() else None)
 
             label = line[1].strip() if len(line) > 1 else ""

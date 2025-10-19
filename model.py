@@ -21,7 +21,7 @@ from params import build_args, resolve_paths
 from dataset import MSADataset
 from prompts import build_instruction, build_user_content
 from utils import get_labels_and_template
-from retrieve_demo import read_train_items, build_demo_messages
+from retrieve_demo import load_offline_demo, read_train_items, build_demo_messages, _to_jsonable
 from logs.logs import _finalize_and_save,_resolve_pred_field,_write_rag_debug_and_stats
 # ---------------- Logging / Environment ----------------
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -290,16 +290,29 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     train_jsonl_path = Path(os.getenv("TRAIN_JSONL") or getattr(args, "train_jsonl", ""))
     train_items = read_train_items(train_jsonl_path,dataset_name=dataset_name,image_base=Path(args.data_dir) / "imgs",make_abs_path=True,use_aspect_line=True,replace_placeholder=True) if use_demo else []
     prefix = f"{split_name}2train_{emb_tag}"
-    demo_index_path = Path(args.data_dir) / f"{prefix}_top10_idx.npy"
-    demo_sim_path = Path(args.data_dir) / f"{prefix}_top10_sim.npy"
+    offline_prefix = Path(args.data_dir) / prefix
+
+    demo_mode = os.getenv("DEMO_MODE", "global").strip().lower()  
     demo_index = None
-    demo_sim = None
-    if use_demo and demo_index_path.exists():
-        demo_index = np.load(str(demo_index_path))  # (N_split, K_big)
-        demo_sim = np.load(str(demo_sim_path))
-        print(f"[*] Loaded demo index: {demo_index_path}  shape={demo_index.shape}", flush=True)
-    elif use_demo:
-        print(f"[warn] USE_DEMO=TRUE but DEMO_INDEX not found: {demo_index_path}", flush=True)
+    demo_sim   = None
+    per_idx    = None
+    per_sim    = None
+    per_classes= None
+    if use_demo:
+        try:
+            loaded_idx, loaded_sim, meta = load_offline_demo(offline_prefix, mode=demo_mode, global_topk=10)
+            if meta["mode"] == "global":
+                demo_index, demo_sim = loaded_idx, loaded_sim
+            elif meta["mode"] == "balanced":
+                demo_index, demo_sim = loaded_idx, loaded_sim
+                per_classes = meta.get("classes", None)  
+            elif meta["mode"] == "perclass":
+                per_idx, per_sim = loaded_idx, loaded_sim  # dict<class -> [Nq,Kc]>
+                per_classes = meta.get("classes", None)
+                print(f"[*] per-class demo classes: {per_classes}", flush=True)
+            print(f"[*] DEMO_MODE={demo_mode} ready.", flush=True)
+        except Exception as e:
+            print(f"[warn] USE_DEMO=TRUE but failed to load DEMO indices ({demo_mode}): {e}", flush=True)
 
     local_results: List[Tuple[int, str]] = []
     local_gts: List[Tuple[int, str]] = []
@@ -324,44 +337,95 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         # ---------- build demos from offline index + diagnostics----------
         prefix_demo_msgs = []
         demo_diag = {"demos": []}
-        if use_demo and (demo_index is not None) and (len(train_items) > 0):
+        if use_demo and (len(train_items) > 0):
             row = i
-            if (row is not None) and (0 <= row < demo_index.shape[0]):
-                ids = demo_index[row]
-                sims = demo_sim[row]
-                k = min(int(demo_topk), ids.shape[-1])
-                demos = []
+            demos = []
 
-                for m in range(k):
-                    j = int(ids[m])
-                    if 0 <= j < len(train_items):
+            if demo_mode == "global" and demo_index is not None and demo_sim is not None:
+                if (row is not None) and (0 <= row < demo_index.shape[0]):
+                    ids = demo_index[row]
+                    sims = demo_sim[row]
+                    k = min(int(demo_topk), ids.shape[-1])
+                    for m in range(k):
+                        j = int(ids[m])
+                        if j < 0:
+                            continue  
+                        if 0 <= j < len(train_items):
+                            it = train_items[j]
+                            d_text  = it.get("text", "")
+                            d_label = it.get("label", "")
+                            imgp = None
+                            if it.get("image"):
+                                cand = it["image"]
+                                if Path(cand).exists():
+                                    imgp = cand
+                            demos.append({
+                                "text": d_text,
+                                "label": label_map.get(d_label, d_label),
+                                "image": imgp,
+                                "sim": _to_jsonable(sims[m]),
+                                "train_id": j,
+                            })
+            elif demo_mode == "balanced" and demo_index is not None and demo_sim is not None:
+                C = len(per_classes)
+                if 0 <= row < demo_index.shape[0]:
+                    ids = demo_index[row]
+                    sims = demo_sim[row]
+                    Kc_avail = ids.shape[-1] // C
+                    per_cls_take = min(int(demo_topk), Kc_avail)
+                    for r in range(per_cls_take):
+                        for cls_i in range(C):
+                            pos = cls_i + r * C  
+                            j = int(ids[pos])
+                            if j < 0 or j >= len(train_items):
+                                continue
+                            it = train_items[j]
+                            imgp = None
+                            if it.get("image"):
+                                cand = it["image"]
+                                if Path(cand).exists():
+                                    imgp = cand
+                            demos.append({
+                                "text":  it.get("text", ""),
+                                "label": label_map.get(it.get("label", ""), it.get("label", "")),
+                                "image": imgp,
+                                "sim":   _to_jsonable(float(sims[pos])),
+                                "train_id": j,
+                            })
+            elif demo_mode == "perclass" and per_idx is not None and per_sim is not None and per_classes:
+                for c in per_classes:
+                    ids_c  = per_idx[c][row]   # (Kc,)
+                    sims_c = per_sim[c][row]   # (Kc,)
+                    take = min(int(demo_topk), ids_c.shape[-1])
+                    for r in range(take):
+                        j = int(ids_c[r])
+                        if j < 0 or j >= len(train_items):
+                            continue
                         it = train_items[j]
-                        d_text = it.get("text", "")
-                        d_label = it.get("label", "")
                         imgp = None
                         if it.get("image"):
                             cand = it["image"]
                             if Path(cand).exists():
                                 imgp = cand
                         demos.append({
-                            "text": d_text,
-                            "label": label_map[d_label],
+                            "text":  it.get("text", ""),
+                            "label": label_map.get(it.get("label", ""), it.get("label", "")),
                             "image": imgp,
-                            "sim": _to_jsonable(sims[m]),
+                            "sim":   _to_jsonable(float(sims_c[r])),
                             "train_id": j,
                         })
-                if demos:
-                    prefix_demo_msgs = build_demo_messages(demos, dataset_name=dataset_name)
-                    demo_diag["demos"] = [
-                        {
-                            "train_id": d["train_id"],
-                            "label": d["label"],
-                            "text": d["text"],
-                            "image": (d["image"] or ""),
-                            "sim": d["sim"],
-                        }
-                        for d in demos
-                    ]
+            if demos:
+                prefix_demo_msgs = build_demo_messages(demos, dataset_name=dataset_name)
+                demo_diag["demos"] = [
+                    {
+                        "train_id": d["train_id"],
+                        "label": d["label"],
+                        "text": d["text"],
+                        "image": (d["image"] or ""),
+                        "sim": d["sim"],
+                    }
+                    for d in demos
+                ]
         demo_diags_by_idx[i] = demo_diag
         if len(prompt_variants) == 1:
             tpl = prompt_variants[0]
@@ -380,7 +444,8 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
             else:
                 cur_user = {"role": "user", "content": [{"type": "text", "text": user_text}]}
             msgs = [system_msg] + prefix_demo_msgs + [cur_user]
-            #print(msgs)
+            if i%100 == 0:
+                print(f"Sample {i} messages: {msgs}", flush=True)
             raw = run_one(model, processor, msgs, max_new_tokens=args.max_new_tokens)
             pred = parse_label_from_output(raw, label_space)
             local_results.append((i, pred))
