@@ -1,20 +1,14 @@
 from pathlib import Path
-from typing import List, Tuple, Optional,Dict
+from typing import List, Tuple, Optional,Dict, Any
 import numpy as np
 import json
 import os
-
+from utils import _to_jsonable
 COARSE = "coarse"
 FINE   = "fine"
 
 COARSE_DATASETS = {"mvsa-s", "mvsa-m", "tumemo", "tumblr"}
 FINE_DATASETS   = {"t2015", "t2017", "masad"}
-
-def _to_jsonable(x):
-    try:
-        return float(x)
-    except Exception:
-        return 0.0
 
 def _balanced_roundrobin_merge(mats: List[np.ndarray]) -> np.ndarray:
     if not mats:
@@ -155,6 +149,178 @@ def read_train_items(
             except Exception as e:
                 continue
     return items
+
+class DemoProvider:
+    """
+    负责：
+      - 从 args/env 读取配置并加载离线 demo 索引（global / balanced / perclass）
+      - 针对单个样本 row，产出 prefix_demo_msgs 与诊断字典
+    依赖：本文件中的 load_offline_demo / read_train_items / build_demo_messages
+    """
+
+    def __init__(
+        self,
+        *,
+        use_demo: bool,
+        demo_mode: str,
+        demo_topk: int,
+        train_items: List[Dict],
+        demo_index=None,
+        demo_sim=None,
+        per_idx=None,
+        per_sim=None,
+        per_classes: Optional[List[str]] = None,
+    ):
+        self.use_demo = use_demo
+        self.demo_mode = demo_mode
+        self.demo_topk = demo_topk
+        self.train_items = train_items
+        self.demo_index = demo_index
+        self.demo_sim = demo_sim
+        self.per_idx = per_idx
+        self.per_sim = per_sim
+        self.per_classes = per_classes or []
+
+    @classmethod
+    def from_env(cls, args, dataset_name: str, image_base: Path) -> "DemoProvider":
+        """
+        读取环境变量并加载离线索引：
+          - USE_DEMO / DEMO_MODE / DEMO_TOPK / DEMO_EMB_TAG / TRAIN_JSONL
+        """
+        use_demo: bool = os.getenv("USE_DEMO", "0").strip().lower() in {"1", "true", "yes"}
+        demo_topk: int = int(os.getenv("DEMO_TOPK", "3"))
+        emb_tag = os.getenv("DEMO_EMB_TAG", "sbert-roberta-large").strip()
+        split_name = "test" if "test" in args.tsv else "val"
+        train_jsonl_path = Path(os.getenv("TRAIN_JSONL") or getattr(args, "train_jsonl", ""))
+
+        train_items = (
+            read_train_items(
+                train_jsonl_path,
+                dataset_name=dataset_name,
+                image_base=image_base,
+                make_abs_path=True,
+                use_aspect_line=True,
+                replace_placeholder=True,
+            )
+            if use_demo
+            else []
+        )
+
+        offline_prefix = Path(args.data_dir) / f"{split_name}2train_{emb_tag}"
+        demo_mode = os.getenv("DEMO_MODE", "global").strip().lower()
+
+        demo_index = demo_sim = per_idx = per_sim = None
+        per_classes = None
+
+        if use_demo:
+            try:
+                loaded_idx, loaded_sim, meta = load_offline_demo(
+                    offline_prefix, mode=demo_mode, global_topk=10
+                )
+                if meta["mode"] in {"global", "balanced"}:
+                    demo_index, demo_sim = loaded_idx, loaded_sim
+                    per_classes = meta.get("classes", None)
+                elif meta["mode"] == "perclass":
+                    per_idx, per_sim = loaded_idx, loaded_sim
+                    per_classes = meta.get("classes", None)
+                    print(f"[*] per-class demo classes: {per_classes}", flush=True)
+                print(f"[*] DEMO_MODE={demo_mode} ready.", flush=True)
+            except Exception as e:
+                print(
+                    f"[warn] USE_DEMO=TRUE but failed to load DEMO indices ({demo_mode}): {e}",
+                    flush=True,
+                )
+
+        return cls(
+            use_demo=use_demo,
+            demo_mode=demo_mode,
+            demo_topk=demo_topk,
+            train_items=train_items,
+            demo_index=demo_index,
+            demo_sim=demo_sim,
+            per_idx=per_idx,
+            per_sim=per_sim,
+            per_classes=per_classes,
+        )
+
+    def for_query(
+        self,
+        row: int,
+        *,
+        label_map: Dict[str, str],
+        dataset_name: str,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        针对一个样本行号 row，返回：
+            - prefix_demo_msgs: List[chat message dict]
+            - demo_diag: 诊断信息（写日志用）
+        """
+        if not (self.use_demo and self.train_items):
+            return [], {"demos": []}
+
+        demos: List[Dict[str, Any]] = []
+        mode = self.demo_mode
+
+        if mode in {"global", "balanced"} and self.demo_index is not None and self.demo_sim is not None:
+            if 0 <= row < self.demo_index.shape[0]:
+                ids = self.demo_index[row]
+                sims = self.demo_sim[row]
+                if mode == "global":
+                    k = min(int(self.demo_topk), ids.shape[-1])
+                    for m in range(k):
+                        self._push_demo(demos, int(ids[m]), sims[m], label_map)
+                else:
+                    C = len(self.per_classes) or 1
+                    Kc_avail = ids.shape[-1] // C
+                    per_cls_take = min(int(self.demo_topk), Kc_avail)
+                    for r in range(per_cls_take):
+                        for cls_i in range(C):
+                            pos = cls_i + r * C
+                            self._push_demo(demos, int(ids[pos]), sims[pos], label_map)
+
+        elif mode == "perclass" and self.per_idx is not None and self.per_sim is not None and self.per_classes:
+            for c in self.per_classes:
+                ids_c = self.per_idx[c][row]   # (Kc,)
+                sims_c = self.per_sim[c][row]  # (Kc,)
+                take = min(int(self.demo_topk), ids_c.shape[-1])
+                for r in range(take):
+                    self._push_demo(demos, int(ids_c[r]), sims_c[r], label_map)
+
+        prefix_demo_msgs = build_demo_messages(demos, dataset_name=dataset_name) if demos else []
+        demo_diag = {
+            "demos": [
+                {
+                    "train_id": d.get("train_id", -1),
+                    "label": d.get("label", ""),
+                    "text": d.get("text", ""),
+                    "image": (d.get("image") or ""),
+                    "sim": d.get("sim"),
+                }
+                for d in demos
+            ]
+        }
+        return prefix_demo_msgs, demo_diag
+
+    def _push_demo(self, demos: List[Dict[str, Any]], j: int, sim_val, label_map: Dict[str, str]):
+        if j < 0 or j >= len(self.train_items):
+            return
+        it = self.train_items[j]
+        imgp = None
+        cand = it.get("image")
+        if cand:
+            p = Path(cand)
+            if p.exists():
+                imgp = p.as_posix()
+        demos.append(
+            {
+                "text": it.get("text", ""),
+                "label": label_map.get(it.get("label", ""), it.get("label", "")),
+                "image": imgp,
+                "sim": _to_jsonable(sim_val),
+                "train_id": j,
+            }
+        )
+
 
 def build_demo_messages(
     demos: List[dict],

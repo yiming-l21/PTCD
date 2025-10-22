@@ -36,7 +36,7 @@ for dataset in "${DATASETS[@]}"; do
     echo "start processing dataset: ${dataset}"
     for variant in "${VARIANTS[@]}"; do
       export PROMPT_VARIANT="${variant}"
-      python model.py \
+      python src/run.py \
           --data_dir "datasets/${dataset}" \
           --img_dir "datasets/${dataset}/imgs" \
           --tsv "test.tsv" \

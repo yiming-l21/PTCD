@@ -1,5 +1,5 @@
 from typing import List, Literal, Optional
-
+import os
 TemplateVariant = Literal[
     "STRICT",           # baseline
     "IMAGE_FIRST",      # image first, then text correction
@@ -91,3 +91,26 @@ def build_user_content(text_s: str, text_a: str | None, has_aspect: bool = True)
     if has_aspect and text_a:
         return f'Text: {text_s}\nAspect: {text_a}\nReturn JSON only.'
     return f'Text: {text_s}\nReturn JSON only.'
+
+
+def build_prompt_variant():
+    single_tpl = os.getenv("PROMPT_VARIANT", "STRICT").strip().upper()
+    allowed_tpls = {"STRICT","IMAGE_FIRST","TEXT_FIRST","CONFLICT_AWARE","SARCASM_AWARE"}
+
+    ens_env = os.getenv("PROMPT_ENSEMBLE", "").strip()
+    if ens_env:
+        prompt_variants = [v.strip().upper() for v in ens_env.split(",") if v.strip()]
+    else:
+        prompt_variants = [single_tpl]
+
+    prompt_variants = [v for v in prompt_variants if v in allowed_tpls]
+    if not prompt_variants:
+        prompt_variants = ["STRICT"]
+
+    run_suffix = os.getenv("RUN_SUFFIX", "").strip()
+    if not run_suffix:
+        run_suffix = ("ENS_" + "-".join(prompt_variants)) if len(prompt_variants) > 1 else prompt_variants[0]
+    os.environ["RUN_SUFFIX"] = run_suffix
+
+    print(f"[*] using prompt variants: {prompt_variants}  (suffix={run_suffix})", flush=True)
+    return prompt_variants

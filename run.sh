@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=2,4,5,6,7
+export CUDA_VISIBLE_DEVICES=2,4,5
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
 detect_gpus() {
@@ -31,7 +31,7 @@ export NCCL_P2P_DISABLE=0
 
 export USE_DEMO=1
 
-DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
+DATASETS=("mvsa-s")
 
 for k in 1 2; do
   # topk=1 时两个模式等价，只跑 perclass；topk=2 时跑 perclass 和 balanced
@@ -51,8 +51,7 @@ for k in 1 2; do
     for dataset in "${DATASETS[@]}"; do
       echo "[start] dataset: ${dataset}"
       export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
-
-      python model.py \
+      python src/run.py \
         --data_dir "datasets/${dataset}" \
         --img_dir "datasets/${dataset}/imgs" \
         --tsv "test.tsv" \

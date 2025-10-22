@@ -78,15 +78,15 @@ PY
   case "${mode}" in
     STRICT)
       env ${envs} PROMPT_VARIANT="STRICT" \
-        python model.py "${common_args[@]}" "${img_opt[@]}"
+        python src/run.py "${common_args[@]}" "${img_opt[@]}"
       ;;
     ENS3)
       env ${envs} PROMPT_ENSEMBLE="STRICT,IMAGE_FIRST,TEXT_FIRST" \
-        python model.py "${common_args[@]}" "${img_opt[@]}"
+        python src/run.py "${common_args[@]}" "${img_opt[@]}"
       ;;
     ENS5)
       env ${envs} PROMPT_ENSEMBLE="STRICT,IMAGE_FIRST,TEXT_FIRST,CONFLICT_AWARE,SARCASM_AWARE" \
-        python model.py "${common_args[@]}" "${img_opt[@]}"
+        python src/run.py "${common_args[@]}" "${img_opt[@]}"
       ;;
     *)
       echo "[ERR] unknown mode=${mode}" >&2
