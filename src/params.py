@@ -10,15 +10,16 @@ def build_args():
     p.add_argument('--data_dir', type=str, default='datasets/t2015', help='包含 TSV 的数据目录')
     p.add_argument('--img_dir', type=str, default=None, help='图片目录；为空则文本-only')
     p.add_argument('--tsv', type=str, default='test.tsv', help='要评测的 TSV 文件名')
-
+    p.add_argument('--train_tsv', type=str, default='train_few1.tsv', help='要训练的 TSV 文件名')
+    p.add_argument('--dev_tsv', type=str, default='dev_few1.tsv', help='要验证的 TSV 文件名')
 
     # model
     p.add_argument('--model', type=str, default='Qwen/Qwen2.5-VL-7B-Instruct')
     p.add_argument('--dtype', type=str, default='auto', choices=['auto','bf16','fp16','fp32'])
     p.add_argument('--device_map', type=str, default='cuda:2')
     p.add_argument('--attn_impl', type=str, default='sdpa', choices=['sdpa','flash_attention_2'])
-    p.add_argument('--min_pixels', type=int, default=224*224)
-    p.add_argument('--max_pixels', type=int, default=1024*1024)
+    p.add_argument('--min_pixels', type=int, default=224)
+    p.add_argument('--max_pixels', type=int, default=1024)
 
 
     # inference
@@ -34,6 +35,18 @@ def build_args():
     p.add_argument('--distributed', action='store_true', help='Enable multi-GPU DDP')
     p.add_argument('--dump_raw', action='store_true', help='Dump raw generations to raw_generations.jsonl')
 
+    # ===== soft-prompt =====
+    p.add_argument('--sp_n_tokens', type=int, default=16, help='learnable textual tokens 个数')
+    p.add_argument('--sp_mode', type=str, default='combined', choices=['generic','class_specific','combined'])
+    p.add_argument('--sp_lambda', type=float, default=0.5, help='combined 模式下的 λ')
+    p.add_argument('--sp_per_tpl', action='store_true', help='是否为每个模板维护独立 prompt 头')
+    p.add_argument('--sp_vtokens', type=int, default=0, help='视觉 v-tokens 个数（>0 则启用视觉前缀）')
+
+    # ===== sp trainer =====
+    p.add_argument('--sp_lr', type=float, default=5e-3)
+    p.add_argument('--sp_steps', type=int, default=1000)
+    p.add_argument('--sp_accum', type=int, default=1, help='梯度累积步数')
+    p.add_argument('--sp_ckpt', type=str, default='prompt_ckpt.pt')
     return p.parse_args()
 
 

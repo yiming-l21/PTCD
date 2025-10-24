@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=2,4,5
+export CUDA_VISIBLE_DEVICES=2
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
 detect_gpus() {
@@ -29,8 +29,8 @@ export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 
-export USE_DEMO=1
-
+export USE_DEMO=0
+export SP_N_TOKENS=8
 DATASETS=("mvsa-s")
 
 for k in 1 2; do
@@ -51,6 +51,8 @@ for k in 1 2; do
     for dataset in "${DATASETS[@]}"; do
       echo "[start] dataset: ${dataset}"
       export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
+      export SOFT_PROMPT_CKPT="/home/lym/VLM-MSA/prompt_ckpt.best.pt"
+
       python src/run.py \
         --data_dir "datasets/${dataset}" \
         --img_dir "datasets/${dataset}/imgs" \

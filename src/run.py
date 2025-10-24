@@ -25,6 +25,7 @@ from src.prompts import build_instruction, build_user_content, build_prompt_vari
 from src.dataset_info import get_labels_and_template
 from src.utils import set_seed, load_model_and_processor, parse_label_from_output, infer_with_variants
 from src.retrieve_demo import DemoProvider
+from src.prompt_tuning.prompt_learner import load_prompt_ckpt
 from logs.logs import _finalize_and_save,_resolve_pred_field,_write_rag_debug_and_stats
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from transformers.utils import logging as hf_logging  # noqa: E402
@@ -32,8 +33,19 @@ hf_logging.set_verbosity_error()
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+def _maybe_init_prompt(model, processor, label_space):
+    ckpt_path = os.getenv("SOFT_PROMPT_CKPT", "").strip()
+    if not ckpt_path:
+        return None
+    st = load_prompt_ckpt(ckpt_path, map_location=model.device)
+    ids = processor.tokenizer.convert_tokens_to_ids(st["soft_tokens"])
+    vecs = st["soft_vecs"].to(model.device).to(model.get_input_embeddings().weight.dtype)
+    with torch.no_grad():
+        model.get_input_embeddings().weight[ids] = vecs
+    print(f"[*] soft-prompt rows loaded into embedding from {ckpt_path}", flush=True)
+    return True
 
-def run_one(model, processor, messages, max_new_tokens: int) -> str:
+def run_one(model, processor, messages, max_new_tokens: int, label_space: List[str]) -> str:
     """Single end-to-end generation (greedy decoding)."""
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
@@ -44,7 +56,6 @@ def run_one(model, processor, messages, max_new_tokens: int) -> str:
         padding=True,
         return_tensors="pt",
     ).to(model.device)
-
     with torch.inference_mode():
         out = model.generate(
             **inputs,
@@ -63,7 +74,6 @@ def run_one(model, processor, messages, max_new_tokens: int) -> str:
 
     gen_ids = out[0][cut:]
     text_out = processor.decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-
     # Truncate to first JSON block if applicable
     j = text_out.find("}")
     if j >= 0:
@@ -164,13 +174,13 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     samples = reader.read()
     samples_meta = reader.get_samples_meta()
     # Model & Processor
-    use_fast = getattr(args, "use_fast_processor", True)
+    use_fast = getattr(args, "use_fast_processor", False)
     model, processor = load_model_and_processor(
         model_id=args.model, dtype=args.dtype, device=device,
         attn_impl=args.attn_impl, min_pixels=args.min_pixels, max_pixels=args.max_pixels,
         use_fast_processor=use_fast
     )
-
+    _maybe_init_prompt(model, processor, label_space)
     # Prompt setup
     use_image_flag = (args.img_dir is not None) and (not args.no_img)
     has_aspect = getattr(

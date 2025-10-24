@@ -2,6 +2,7 @@ import re
 import json
 import random
 import torch
+import os
 import numpy as np
 from pathlib import Path
 from typing import List
@@ -9,6 +10,8 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from typing import List, Dict, Any, Tuple, Optional
 from prompts import build_instruction
 from ensemble import _majority_vote
+from qwen_vl_utils import process_vision_info
+from prompt_tuning.sp_utils import init_soft_tokens
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -40,7 +43,7 @@ def load_model_and_processor(
         attn_implementation=attn_impl,
     )
     model.to(device).eval()
-
+    print(f"[*]check processor params min_pixels:{min_pixels}, max_pixels:{max_pixels}, use_fast_processor:{use_fast_processor}", flush=True)
     processor = AutoProcessor.from_pretrained(
         model_id, min_pixels=min_pixels, max_pixels=max_pixels, use_fast=use_fast_processor
     )
@@ -49,6 +52,11 @@ def load_model_and_processor(
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model.generation_config.pad_token_id = tok.pad_token_id
+    n_soft = int(os.getenv("SP_N_TOKENS", "0"))
+    soft_tokens, soft_ids = init_soft_tokens(tok, model, n_soft)
+    if n_soft > 0:
+        print(f"[*] soft tokens registered: {soft_tokens}, soft id registerd: {soft_ids}", flush=True)
+    # initialize soft tokens
     return model, processor
 
 def _to_jsonable(x):
@@ -97,7 +105,13 @@ def build_msgs(
     img_path: Optional[str],
     prefix_demo_msgs: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    
+    n_soft = int(os.getenv("SP_N_TOKENS", "0"))
+    soft_tokens = [f"<soft{i}>" for i in range(n_soft)]
+    soft_str = "".join(soft_tokens) if n_soft > 0 else ""
+    user_text = soft_str + user_text
     system_msg = {"role": "system", "content": instruction}
+
     if use_image and img_path:
         user_msg = {
             "role": "user",
@@ -142,7 +156,7 @@ def infer_with_variants(
             img_path=img_path,
             prefix_demo_msgs=prefix_demo_msgs,
         )
-        raw = run_one_fn(model, processor, msgs, max_new_tokens=max_new_tokens)
+        raw = run_one_fn(model, processor, msgs, max_new_tokens=max_new_tokens, label_space=label_space)
         pred = parse_label_fn(raw, label_space)
         per_tpl_preds.append(pred)
         raw_bundle.append({"tpl": tpl, "raw": raw})
