@@ -61,7 +61,7 @@ def main():
 
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model, torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
     model.to(device).eval()
-    processor = AutoProcessor.from_pretrained(args.model, min_pixels=args.min_pixels, max_pixels=args.max_pixels)
+    processor = AutoProcessor.from_pretrained(args.model, min_pixels=args.min_pixels, max_pixels=args.max_pixels, use_fast=False)
 
     n_soft = int(os.getenv("SP_N_TOKENS", "0"))
     soft_tokens, soft_ids = init_soft_tokens(processor.tokenizer, model, n_soft)
@@ -84,10 +84,11 @@ def main():
     train_loader = DataLoader(train_samples, batch_size=getattr(args, "batch_size", 1), shuffle=True, collate_fn=coll)
     dev_loader = DataLoader(dev_samples, batch_size= 1, shuffle=False, collate_fn=coll)
     tr_cfg = TrainCfg(
-        lr=float(getattr(args, "sp_lr", 5e-2)),
+        lr=float(getattr(args, "sp_lr", 1e-3)),
         max_steps=int(getattr(args, "sp_steps", 3000)),
         grad_accum=int(getattr(args, "sp_accum", 1)),
-        save_ckpt=str(getattr(args, "sp_ckpt", "prompt_ckpt.pt"))
+        save_ckpt=str(getattr(args, "sp_ckpt", "prompt_ckpt.pt")),
+        ckpt_best=getattr(args, "sp_best", "prompt_ckpt.best.pt"),
     )
     learner = SoftPromptLearner(model, processor, ["STRICT"], demo, labels, tr_cfg, device)
 

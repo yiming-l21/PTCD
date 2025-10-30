@@ -43,10 +43,11 @@ def build_args():
     p.add_argument('--sp_vtokens', type=int, default=0, help='视觉 v-tokens 个数（>0 则启用视觉前缀）')
 
     # ===== sp trainer =====
-    p.add_argument('--sp_lr', type=float, default=5e-3)
+    p.add_argument('--sp_lr', type=float, default=3e-4)
     p.add_argument('--sp_steps', type=int, default=1000)
     p.add_argument('--sp_accum', type=int, default=1, help='梯度累积步数')
     p.add_argument('--sp_ckpt', type=str, default='prompt_ckpt.pt')
+    p.add_argument('--sp_best', type=str, default='prompt_ckpt.best.pt')
     return p.parse_args()
 
 

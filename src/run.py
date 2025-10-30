@@ -44,6 +44,62 @@ def _maybe_init_prompt(model, processor, label_space):
         model.get_input_embeddings().weight[ids] = vecs
     print(f"[*] soft-prompt rows loaded into embedding from {ckpt_path}", flush=True)
     return True
+# ==== metrics helpers (no sklearn) ====
+def _compute_confusion_and_metrics(preds, gts, labels):
+    """Return cm(np.int64[K,K]), metrics(dict), and per-class acc(dict)."""
+    import numpy as _np
+
+    label2id = {l: i for i, l in enumerate(labels)}
+    y_true = _np.array([label2id[x] for x in gts], dtype=_np.int64)
+    y_pred = _np.array([label2id[x] for x in preds], dtype=_np.int64)
+
+    K = len(labels)
+    cm = _np.zeros((K, K), dtype=_np.int64)
+    for t, p in zip(y_true, y_pred):
+        cm[t, p] += 1
+
+    support = cm.sum(axis=1)                    # per true class
+    pred_sum = cm.sum(axis=0)                   # per predicted class
+    tp = _np.diag(cm)
+
+    # avoid div-by-zero
+    recall = _np.divide(tp, _np.maximum(support, 1), dtype=_np.float64)
+    precision = _np.divide(tp, _np.maximum(pred_sum, 1), dtype=_np.float64)
+    f1 = _np.divide(2 * precision * recall, _np.maximum(precision + recall, 1e-12))
+
+    acc = float((y_true == y_pred).mean())
+    macro_f1 = float(f1.mean())
+    weighted_f1 = float((f1 * (support / _np.maximum(support.sum(), 1))).sum())
+
+    per_class_acc = {labels[i]: float(recall[i]) for i in range(K)}
+
+    metrics = {
+        "acc": acc,
+        "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
+        "per_class_acc": per_class_acc,
+        "support": {labels[i]: int(support[i]) for i in range(K)},
+    }
+    return cm, metrics, per_class_acc
+
+
+def _print_and_save_confusion(cm, labels, out_dir, prefix):
+    """Pretty-print and save CSV/JSON."""
+    import os as _os, json as _json
+    from pathlib import Path as _Path
+    import numpy as _np
+
+    _Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    # Console pretty print
+    K = len(labels)
+    header = " " * 12 + " | " + " ".join([f"{l:>8}" for l in labels])
+    print("\n[confusion_matrix] rows=gold, cols=pred")
+    print(header)
+    for i, l in enumerate(labels):
+        row = " ".join([f"{int(cm[i, j]):>8d}" for j in range(K)])
+        print(f"{l:>10} | {row}")
+
 
 def run_one(model, processor, messages, max_new_tokens: int, label_space: List[str]) -> str:
     """Single end-to-end generation (greedy decoding)."""
@@ -270,6 +326,10 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
             gts   = [g for _, g in all_gt]
             raws  = [r for _, r in all_raw]
             _finalize_and_save(preds, gts, raws, dataset_name, samples_meta, pred_field)
+            cm, metrics, _ = _compute_confusion_and_metrics(preds, gts, label_space)
+            out_dir = Path("logs") / dataset_name
+            prefix = pred_field  # e.g., pred_demo1_none / pred_none_none 等
+            _print_and_save_confusion(cm, label_space, out_dir, prefix)
             if demo.use_demo:
                 _write_rag_debug_and_stats(dataset_name, pred_field, samples_meta, merged_diag, preds, gts)
         dist.barrier()
@@ -279,6 +339,10 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         gts   = [g for _, g in sorted(local_gts,     key=lambda x: x[0])]
         raws  = [r for _, r in sorted(local_raws,    key=lambda x: x[0])] if getattr(args, "dump_raw", False) else []
         _finalize_and_save(preds, gts, raws, dataset_name, samples_meta, pred_field)
+        cm, metrics, _ = _compute_confusion_and_metrics(preds, gts, label_space)
+        out_dir = Path("logs") / dataset_name
+        prefix = pred_field  # e.g., pred_demo1_none / pred_none_none 等
+        _print_and_save_confusion(cm, label_space, out_dir, prefix)
         if demo.use_demo:
             _write_rag_debug_and_stats(dataset_name, pred_field, samples_meta, demo_diags_by_idx, preds, gts)
 

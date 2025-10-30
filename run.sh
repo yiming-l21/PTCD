@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=2,4,5,6,7
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
 detect_gpus() {
@@ -31,7 +31,7 @@ export NCCL_P2P_DISABLE=0
 
 export USE_DEMO=0
 export SP_N_TOKENS=8
-DATASETS=("mvsa-s")
+DATASETS=("mvsa-m" "masad" "t2015" "t2017" "tumemo")
 
 for k in 1 2; do
   # topk=1 时两个模式等价，只跑 perclass；topk=2 时跑 perclass 和 balanced
@@ -40,7 +40,12 @@ for k in 1 2; do
   else
     MODES=("perclass" "balanced")
   fi
-
+  if [ "$USE_DEMO" -eq 0 ]; then
+    MODES=("none")
+    if [ "$k" -ne 1 ]; then
+      continue  
+    fi
+  fi
   for mode in "${MODES[@]}"; do
     export DEMO_TOPK="$k"
     export DEMO_MODE="$mode"
@@ -51,13 +56,13 @@ for k in 1 2; do
     for dataset in "${DATASETS[@]}"; do
       echo "[start] dataset: ${dataset}"
       export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
-      export SOFT_PROMPT_CKPT="/home/lym/VLM-MSA/prompt_ckpt.best.pt"
+      export SOFT_PROMPT_CKPT="/home/lym/VLM-MSA/ckpt/${dataset}_prompt_ckpt.best.pt"
 
       python src/run.py \
         --data_dir "datasets/${dataset}" \
         --img_dir "datasets/${dataset}/imgs" \
         --tsv "test.tsv" \
-        --labels "positive,neutral,negative" \
+        --labels "negative,neutral,positive" \
         --model "/home/lym/models/qwen2.5_vl" \
         --dtype "bf16" \
         --attn_impl "sdpa" \

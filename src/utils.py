@@ -45,7 +45,7 @@ def load_model_and_processor(
     model.to(device).eval()
     print(f"[*]check processor params min_pixels:{min_pixels}, max_pixels:{max_pixels}, use_fast_processor:{use_fast_processor}", flush=True)
     processor = AutoProcessor.from_pretrained(
-        model_id, min_pixels=min_pixels, max_pixels=max_pixels, use_fast=use_fast_processor
+        model_id, min_pixels=min_pixels, max_pixels=max_pixels, use_fast=False
     )
     tok = processor.tokenizer
     tok.padding_side = "left"
