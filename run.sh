@@ -31,7 +31,7 @@ export NCCL_P2P_DISABLE=0
 
 export USE_DEMO=0
 export SP_N_TOKENS=8
-DATASETS=("mvsa-m" "masad" "t2015" "t2017" "tumemo")
+DATASETS=("tumemo")
 
 for k in 1 2; do
   # topk=1 时两个模式等价，只跑 perclass；topk=2 时跑 perclass 和 balanced
@@ -62,7 +62,6 @@ for k in 1 2; do
         --data_dir "datasets/${dataset}" \
         --img_dir "datasets/${dataset}/imgs" \
         --tsv "test.tsv" \
-        --labels "negative,neutral,positive" \
         --model "/home/lym/models/qwen2.5_vl" \
         --dtype "bf16" \
         --attn_impl "sdpa" \

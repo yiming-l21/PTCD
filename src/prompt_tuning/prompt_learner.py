@@ -8,9 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import PreTrainedModel, PreTrainedTokenizerBase, AutoProcessor
-from retrieve_demo import DemoProvider
-
+from transformers import PreTrainedModel, AutoProcessor
+from src.prompt_tuning.sp_utils import gpu_mem_snapshot
 # --------- ckpt io ---------
 def save_prompt_ckpt(path: str, state: Dict):
     torch.save(state, path)
@@ -38,12 +37,9 @@ class TrainCfg:
     monitor: str = "acc"          # "acc" 或 "loss"
     minimize: bool = True         # 可选：未实现
 
-    # 新增：warmup/decay、梯度裁剪、sanity check、初始化模板
     warmup_steps: int = 200
     warmup_ratio: float = 0.10
     max_grad_norm: float = 1.0
-    do_sanity_overfit: bool = False
-    sanity_steps: int = 200
     init_prompt: Optional[str] = (
         # 用简短、稳定的英文模板初始化软提示，能显著提升早期可学性
         "You are a helpful assistant that answers by returning JSON like {\"label\": \"<class>\"}."
@@ -52,35 +48,67 @@ class TrainCfg:
 
 class SoftPromptLearner:
     """
-    方案1：离散软token。仅训练 embedding 中 <soft*> 行，其他权重全冻结。
-    监督：让模型生成 {"label": "<gold>"}。
+    仅训练 embedding 中 <soft*> 行（其余权重冻结）。
+    使用 nn.utils.parametrize 在前向时“行替换”，
+    从而优化器只持有 O(n_soft×H) 的状态，且梯度可达 soft_param。
     """
+
+    class _ReplaceRowsParam(nn.Module):
+        def __init__(self, soft_idx: torch.Tensor, soft_param: nn.Parameter,
+                    soft_init: torch.Tensor, dropout_p: float = 0.0):
+            super().__init__()
+            self.register_buffer("soft_idx", soft_idx, persistent=False)
+            self.soft_param = soft_param              # (n_soft, H)
+            self.register_buffer("soft_init", soft_init, persistent=False)  # (n_soft, H)
+            self.dropout_p = float(dropout_p)
+
+        def forward(self, base_weight: torch.Tensor) -> torch.Tensor:
+            W2 = base_weight.clone()
+
+            # 训练时才启用；评估/推理时禁用
+            if self.training and self.dropout_p > 0.0:
+                # 每次前向采样一个 (n_soft,1) 的二值 mask
+                with torch.no_grad():
+                    mask = (torch.rand((self.soft_param.size(0), 1), device=self.soft_param.device)
+                            < self.dropout_p)
+                # 在维度上广播：mask==True 用 soft_init，False 用 soft_param
+                eff = torch.where(mask, self.soft_init, self.soft_param)
+            else:
+                eff = self.soft_param
+
+            W2.index_copy_(0, self.soft_idx, eff)
+            return W2
+
 
     def __init__(
         self,
         model: PreTrainedModel,
         processor: AutoProcessor,
         template_variants: List[str],
-        demo_provider: DemoProvider,
+        demo_provider,  # 占位，不使用
         label_space: List[str],
         train_cfg: TrainCfg,
         device: torch.device,
         soft_token_names: Optional[List[str]] = None
     ):
+        import torch.nn.utils.parametrize as P
+
         self.model = model
         self.processor = processor
         self.tok = processor.tokenizer
         self.label_space = list(label_space)
         self.cfg = train_cfg
         self.device = device
-        self.demo_provider = demo_provider
         self.template_variants = template_variants
+
+        # vocab 对齐
         new_vocab = len(self.tok)
         lm_head_rows = self.model.get_output_embeddings().weight.shape[0]
         if lm_head_rows != new_vocab:
             self.model.resize_token_embeddings(new_vocab)
         self.model.config.vocab_size = new_vocab
-        # --- 发现并校验 <soft*> tokens ---
+
+        # --- <soft*> tokens ---
         if soft_token_names is None:
             cand = [t for t in (self.tok.additional_special_tokens or []) if t.startswith("<soft")]
             def _key(s: str) -> int:
@@ -92,75 +120,75 @@ class SoftPromptLearner:
 
         if not self.soft_tokens:
             raise RuntimeError(
-                "未在 tokenizer 中找到任何 <soft*> token。请在外部先注册："
-                " tokenizer.add_special_tokens({'additional_special_tokens': ['<soft0>',...]}), "
+                "未在 tokenizer 中找到任何 <soft*> token。请先注册："
+                "tokenizer.add_special_tokens({'additional_special_tokens': ['<soft0>', ...]}); "
                 "并调用 model.resize_token_embeddings(len(tokenizer))"
             )
-
         self.soft_ids = self.tok.convert_tokens_to_ids(self.soft_tokens)
         if any(x < 0 for x in self.soft_ids):
             raise RuntimeError(f"部分软token未在词表中：{self.soft_tokens} → {self.soft_ids}")
 
-        # --- 冻结全模型，仅训练 embedding 的软行 ---
+        # --- 冻结全模型，仅训练 soft_param ---
         for p in self.model.parameters():
             p.requires_grad_(False)
 
-        self.emb: nn.Parameter = self.model.get_input_embeddings().weight  # [vocab, hidden]
-        self.emb.requires_grad_(True)
+        emb_layer = self.model.get_input_embeddings()
+        self.emb: nn.Parameter = emb_layer.weight  # [V, H]
         V, H = self.emb.shape
-        n_soft = len(self.soft_ids)
-        effective_trainable = int(n_soft * H)
-        print(f"[soft] vocab_size={V} hidden_size={H} n_soft_tokens={n_soft} trainable_params={effective_trainable}")
-
-        # 只更新软token所在的行：通过hook屏蔽其它行的梯度
+        self.emb.requires_grad_(False)
         soft_idx = torch.tensor(self.soft_ids, device=self.emb.device, dtype=torch.long)
-        mask_rows = torch.zeros(self.emb.size(0), device=self.emb.device, dtype=self.emb.dtype)
-        mask_rows[soft_idx] = 1.0
 
-        def grad_mask_hook(grad: torch.Tensor) -> torch.Tensor:
-            # grad: [vocab, hidden]
-            return grad * mask_rows.view(-1, 1)
+        # 训练参数: (n_soft, H)
+        self.soft_param = nn.Parameter(self.emb[self.soft_ids].detach().clone())
 
-        self._hook_handle = self.emb.register_hook(grad_mask_hook)
+        print(f"[soft] vocab_size={V} hidden_size={H} n_soft_tokens={len(self.soft_ids)} trainable_params={len(self.soft_ids) * H}")
 
-        # 只优化 embedding（其余参数冻结且无梯度）
-        self.opt = torch.optim.AdamW([self.emb], lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
+        # 仅优化 soft_param
+        self.opt = torch.optim.AdamW([self.soft_param], lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
 
         # --------- AMP / GradScaler 适配（bf16/fp16）---------
         try:
             self.compute_dtype = next(p.dtype for p in self.model.parameters() if p is not None)
         except StopIteration:
             self.compute_dtype = torch.float32
-
         cuda_available = torch.cuda.is_available()
         want_amp = self.cfg.use_fp16 and cuda_available
 
         if want_amp and self.compute_dtype == torch.float16:
             self.amp_dtype = torch.float16
             self.use_amp = True
-            # FutureWarning: 推荐用 torch.amp.GradScaler('cuda', ...)
             self.scaler = torch.cuda.amp.GradScaler(enabled=True)
         elif want_amp and self.compute_dtype == torch.bfloat16:
             self.amp_dtype = torch.bfloat16
             self.use_amp = True
-            # bf16 不用 scaler
-            self.scaler = torch.cuda.amp.GradScaler(enabled=False)
+            self.scaler = torch.cuda.amp.GradScaler(enabled=False)  # bf16 不用 scaler
         else:
             self.amp_dtype = torch.float32
             self.use_amp = False
             self.scaler = torch.cuda.amp.GradScaler(enabled=False)
 
+        # pad id
         self.pad_id = self.tok.pad_token_id
         if self.pad_id is None:
             self.pad_id = getattr(self.tok, "eos_token_id", 0)
+
         # 学习率调度器：linear warmup + cosine decay
         self.scheduler = self._build_scheduler(self.opt, self.cfg.max_steps, self.cfg.warmup_steps)
 
-        # 软提示初始化（把自然语言模板的 embedding 拷贝/平均到 <soft*> 行）
+        # 软提示初始化（把自然语言模板的 embedding 拷贝/平均到 <soft*> 行的初值）
         if self.cfg.init_prompt:
             self._init_soft_from_text(self.cfg.init_prompt)
 
-        # 启动自检
+        # 记录初始值用于正则/对比
+        with torch.no_grad():
+            self.soft_init = self.soft_param.detach().clone()
+         # 注册参数化：前向时将 base weight 的软行替换成 soft_param
+        P.register_parametrization(
+            emb_layer, "weight",
+            SoftPromptLearner._ReplaceRowsParam(soft_idx=soft_idx, soft_param=self.soft_param, soft_init=self.soft_init, dropout_p=0.0)
+        )
+        self._row_replacer = emb_layer.parametrizations.weight[0]
+        # 自检打印
         with torch.no_grad():
             vocab = len(self.tok)
             lm_head_rows = self.model.get_output_embeddings().weight.shape[0]
@@ -168,11 +196,10 @@ class SoftPromptLearner:
             print(f"[soft] tokens={self.soft_tokens}")
             print(f"[soft] ids={self.soft_ids}")
             print(f"[amp] compute_dtype={self.compute_dtype} amp_dtype={self.amp_dtype} use_amp={self.use_amp} scaler_enabled={self.scaler.is_enabled()}")
-        with torch.no_grad():
-            self.soft_init = self.emb[self.soft_ids].detach().clone()
-    #---------- scheduler ----------
+
+    # ---------- scheduler ----------
     def _build_scheduler(self, opt, max_steps: int, warmup_steps: int):
-        # 先线性 warmup，再 cosine 衰减到 10% lr 尾值
+        # 线性 warmup → cosine 衰减到 10% lr 尾值
         self.base_lr = self.cfg.lr
         self.min_lr = self.cfg.lr * 0.1
 
@@ -192,16 +219,30 @@ class SoftPromptLearner:
         if len(ids) == 0:
             print("[init] template tokenized to empty; skip init.")
             return
-        emb_table = self.model.get_input_embeddings().weight  # [V,H]
-        vecs = emb_table[torch.tensor(ids, device=emb_table.device, dtype=torch.long)]  # [L,H]
+
+        emb_layer = self.model.get_input_embeddings()
+
+        # —— 安全获取“基础表”：如果已经注册过参数化，则取 original；否则直接取 weight —— #
+        base_table = None
+        if hasattr(emb_layer, "parametrizations") and hasattr(emb_layer.parametrizations, "weight"):
+            base_table = emb_layer.parametrizations.weight.original  # [V, H]
+        else:
+            base_table = emb_layer.weight  # [V, H]
+
+        idx = torch.tensor(ids, device=base_table.device, dtype=torch.long)
+        vecs = base_table[idx]  # [L, H]
+
         if len(self.soft_ids) <= vecs.size(0):
             chosen = vecs[:len(self.soft_ids)]
         else:
             reps = (len(self.soft_ids) + vecs.size(0) - 1) // vecs.size(0)
             chosen = vecs.repeat(reps, 1)[:len(self.soft_ids)]
-        noise = (torch.randn_like(chosen) * 0.01)
+
+        noise = torch.randn_like(chosen) * 0.01
         chosen = chosen + noise
-        self.emb[self.soft_ids] = chosen
+
+        # 初始化到 soft_param（训练参数）
+        self.soft_param.data.copy_(chosen)
         print(f"[init] soft prompts initialized from template ({len(ids)} toks)")
 
     # ---------- batch 打包：把 target token 拼到输入末尾，并构造 labels ----------
@@ -225,8 +266,21 @@ class SoftPromptLearner:
         B, T = input_ids.size()
 
         # 透传视觉/其他字段
-        others = {k: (v.to(self.device) if torch.is_tensor(v) else v)
-                  for k, v in batch_inputs.items() if k not in ["input_ids", "attention_mask"]}
+        others: Dict = {}
+        for k, v in batch_inputs.items():
+            if k in ["input_ids", "attention_mask"]:
+                continue
+            if torch.is_tensor(v):
+                others[k] = v.to(self.device)
+            else:
+                others[k] = v
+
+        # 视觉张量 dtype（若存在）
+        if "pixel_values" in others and torch.is_tensor(others["pixel_values"]):
+            target_dtype = torch.bfloat16 if self.compute_dtype == torch.bfloat16 else (
+                torch.float16 if self.compute_dtype == torch.float16 else torch.float32
+            )
+            others["pixel_values"] = others["pixel_values"].to(target_dtype)
 
         max_tgt = max(len(t) for t in target_ids) if target_ids else 0
         pad_id = self.pad_id
@@ -262,7 +316,10 @@ class SoftPromptLearner:
         from utils import parse_label_from_output
         import numpy as np
         import time
-        from collections import defaultdict
+        old_p = 0.0
+        if hasattr(self, "_row_replacer"):
+            old_p = self._row_replacer.dropout_p
+            self._row_replacer.dropout_p = 0.0
         try:
             self.model.generation_config.do_sample = False
             self.model.generation_config.temperature = None
@@ -294,40 +351,36 @@ class SoftPromptLearner:
         C = len(labels)
         cm = np.zeros((C, C), dtype=int)
 
-        printed = 0
-        t0_all = time.time()
-
-        for idx, batch in enumerate(dev_loader):
+        for _, batch in enumerate(dev_loader):
             B = len(batch["gold_label_str"])
             for i in range(B):
                 s_full = batch["hf_inputs"]
 
-                # —— 清洗 hf_inputs：只保留 generate 需要的字段，去掉 temperature 等 —— #
+                # —— 清洗 hf_inputs：只保留 generate 需要的字段 —— #
                 s = {k: v for k, v in s_full.items() if k in _GEN_ALLOW}
                 # 单条样本切片
                 for k, v in list(s.items()):
                     if torch.is_tensor(v) and v.dim() >= 1 and v.size(0) == B:
-                        s[k] = v[i:i+1]
+                        s[k] = v[i:i+1].to(self.device)
 
                 gold_label = batch["gold_label_str"][i]
 
-                with torch.inference_mode():
-                    t1 = time.time()
-                    out = self.model.generate(
-                        **s,
-                        max_new_tokens=max_new_tokens,
-                        do_sample=False,     # 确定性
-                        num_beams=1,
-                    )
-                    latencies.append((time.time() - t1) * 1000.0)
+                t1 = time.time()
+                out = self.model.generate(
+                    **s,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,     # 确定性
+                    num_beams=1,
+                )
+                latencies.append((time.time() - t1) * 1000.0)
 
-                    attn = s.get("attention_mask", None)
-                    if attn is not None:
-                        attn_lens = attn[0].sum().item()
-                        out = out[0, attn_lens:]  # 去掉输入部分
-                    else:
-                        out = out[0]
-                    text_out = self.tok.decode(out, skip_special_tokens=True)
+                attn = s.get("attention_mask", None)
+                if attn is not None:
+                    attn_lens = attn[0].sum().item()
+                    out = out[0, int(attn_lens):]  # 去掉输入部分
+                else:
+                    out = out[0]
+                text_out = self.tok.decode(out, skip_special_tokens=True)
 
                 pred = parse_label_from_output(text_out, label_space)
                 correct += int(pred == gold_label)
@@ -337,13 +390,8 @@ class SoftPromptLearner:
                 if gold_label in idx_of and pred in idx_of:
                     cm[idx_of[gold_label], idx_of[pred]] += 1
 
-                # 打印少量样例
-                if printed < getattr(self.cfg, "eval_print_n", 0):
-                    print(f"[eval-sample] gold={gold_label} pred={pred} text_out={text_out!r}")
-                    printed += 1
-
         acc = correct / max(total, 1)
-        avg_latency = float(np.mean(latencies)) if latencies else 0.0
+        avg_latency = float(sum(latencies) / max(len(latencies), 1)) if latencies else 0.0
 
         # 每类准确率
         per_cls = {}
@@ -351,53 +399,17 @@ class SoftPromptLearner:
             n = cm[c].sum()
             per_cls[labels[c]] = (cm[c, c] / n) if n > 0 else 0.0
 
-        # 打印简要评估报告
+        # 简要评估报告
         print(f"[eval] acc={acc:.4f} avg_latency_ms={avg_latency:.1f}")
         print(f"[eval] per_class_acc=" + ", ".join(f"{k}:{v:.2f}" for k, v in per_cls.items()))
-        # 混淆矩阵（小 dev 可以直接打出来）
         print("[eval] confusion_matrix (rows=gold, cols=pred):")
         for r in range(C):
             row = " ".join(f"{cm[r, c]:3d}" for c in range(C))
             print(f"  {labels[r]:>10s} | {row}")
-
+        if hasattr(self, "_row_replacer"):
+            self._row_replacer.dropout_p = old_p
         self.model.train()
         return acc, avg_latency
-
-    # ---------- 小 batch 过拟合 ----------
-    def _sanity_overfit(self, loader: DataLoader, target_builder):
-        self.model.train()
-        it = iter(loader)
-        batch = next(it)
-        for step in range(self.cfg.sanity_steps):
-            targets = [target_builder(lbl) for lbl in batch["gold_label_str"]]
-            target_ids = [self.tok(t, add_special_tokens=False)["input_ids"] for t in targets]
-            input_ids2, attn2, labels, others = self._pack_batch(batch["hf_inputs"], target_ids)
-            with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
-                out = self.model(input_ids=input_ids2, attention_mask=attn2, labels=labels, **others)
-                loss = out.loss
-
-            if self.scaler.is_enabled():
-                self.scaler.scale(loss).backward()
-                if self.cfg.max_grad_norm is not None:
-                    self.scaler.unscale_(self.opt)
-                    torch.nn.utils.clip_grad_norm_([self.emb], self.cfg.max_grad_norm)
-                self.scaler.step(self.opt)
-                self.scaler.update()
-            else:
-                loss.backward()
-                if self.cfg.max_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_([self.emb], self.cfg.max_grad_norm)
-                self.opt.step()
-            self.opt.zero_grad(set_to_none=True)
-            self.scheduler.step()
-
-            if step % 20 == 0:
-                with torch.no_grad():
-                    gold_txts = [target_builder(lbl) for lbl in batch["gold_label_str"]]
-                    probs = self._avg_logprob(input_ids2, attn2, others, gold_txts)
-                    g_all = (self.emb.grad.norm().item() if self.emb.grad is not None else 0.0)
-                    g_soft = (self.emb.grad[self.soft_ids].norm().item() if self.emb.grad is not None else 0.0)
-                    print(f"[sanity] step={step} loss={loss.item():.4f} gnorm={g_all:.3f} gnorm_soft={g_soft:.3f} avg_gold_lp={probs:.4f}")
 
     @torch.no_grad()
     def _avg_logprob(self, input_ids2, attn2, others, texts: List[str]) -> float:
@@ -416,61 +428,65 @@ class SoftPromptLearner:
             token_lp = log_probs.gather(-1, tgt.unsqueeze(-1)).squeeze(-1).mean().item()
             scores.append(token_lp)
         return float(sum(scores) / max(len(scores), 1))
+
+    @torch.no_grad()
     def _apply_prompt_dropout(self, p=0.2):
-        if p <= 0: return
-        with torch.no_grad():
-            m = torch.rand(len(self.soft_ids), device=self.emb.device) < p
-            self.emb[self.soft_ids] = torch.where(
-                m.unsqueeze(1),
-                self.soft_init,                 
-                self.emb[self.soft_ids]
-            )
+        # 不再改 self.soft_param.data，只设置概率即可
+        if hasattr(self, "_row_replacer"):
+            self._row_replacer.dropout_p = float(max(0.0, min(1.0, p)))
+
+
+    # ---------- 训练 ----------
     def fit(self, loader: DataLoader, dev_loader: Optional[DataLoader], target_builder):
         """
-        训练：只更新 embedding 中的软行。保存 best 与最终 ckpt（均只保存软行子矩阵）。
+        训练：只更新 soft_param。保存 best 与最终 ckpt（均只保存软行子矩阵）。
         """
-        # sanity check：先确保能在单 batch 上迅速过拟合
-        if self.cfg.do_sanity_overfit:
-            print("[sanity] begin single-batch overfit…")
-            self._sanity_overfit(loader, target_builder)
-            print("[sanity] done.")
-
         self.model.train()
         step = 0
         best_metric = -float("inf")
 
-        # 为了正确打印，把梯度范数缓存变量准备好
+        # 缓存日志指标
         gnorm_cache = 0.0
         gnorm_soft_cache = 0.0
 
         while step < self.cfg.max_steps:
             for batch in loader:
+                gpu_mem_snapshot(prefix="before forward")
                 targets = [target_builder(lbl) for lbl in batch["gold_label_str"]]
                 target_ids = [self.tok(t, add_special_tokens=False)["input_ids"] for t in targets]
                 input_ids2, attn2, labels, others = self._pack_batch(batch["hf_inputs"], target_ids)
+
+                # prompt dropout
                 self._apply_prompt_dropout(p=0.2)
+
                 with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                    gpu_mem_snapshot(prefix="before forward")
                     out = self.model(input_ids=input_ids2, attention_mask=attn2, labels=labels, **others)
+                    gpu_mem_snapshot(prefix="after model forward")
                     loss = out.loss
+
+                    # 正则项（作用于 soft_param）
+                    cur = self.soft_param
                     lambda_anchor = 1e-3
-                    anchor_l2 = F.mse_loss(self.emb[self.soft_ids], self.soft_init)
+                    anchor_l2 = F.mse_loss(cur, self.soft_init)
                     lambda_ortho = 1e-3
-                    S = F.normalize(self.emb[self.soft_ids], dim=1)      # (n_soft, H)
+                    S = F.normalize(cur, dim=1)      # (n_soft, H)
                     ortho = (S @ S.t() - torch.eye(len(self.soft_ids), device=S.device)).pow(2).mean()
                     loss = loss + lambda_anchor * anchor_l2 + lambda_ortho * ortho
-
+                gpu_mem_snapshot(prefix="after forward")
                 if self.scaler.is_enabled():
                     self.scaler.scale(loss / max(1, self.cfg.grad_accum)).backward()
+                    gpu_mem_snapshot(prefix="after backward")
                     if ((step + 1) % self.cfg.grad_accum) == 0:
-                        # 在 step/zero_grad 之前计算并缓存梯度范数
                         self.scaler.unscale_(self.opt)
-                        raw_soft_g_cache = (self.emb.grad[self.soft_ids].abs().mean().item() if self.emb.grad is not None else 0.0)
+                        raw_soft_g_cache = (self.soft_param.grad.abs().mean().item()
+                                            if self.soft_param.grad is not None else 0.0)
                         if self.cfg.max_grad_norm is not None:
-                            gnorm_cache = torch.nn.utils.clip_grad_norm_([self.emb], self.cfg.max_grad_norm).item()
+                            gnorm_cache = torch.nn.utils.clip_grad_norm_([self.soft_param], self.cfg.max_grad_norm).item()
                         else:
-                            gnorm_cache = (self.emb.grad.norm().item() if self.emb.grad is not None else 0.0)
-                        gnorm_soft_cache = (self.emb.grad[self.soft_ids].norm().item()
-                                            if self.emb.grad is not None else 0.0)
+                            gnorm_cache = (self.soft_param.grad.norm().item()
+                                           if self.soft_param.grad is not None else 0.0)
+                        gnorm_soft_cache = gnorm_cache
 
                         self.scaler.step(self.opt)
                         self.scaler.update()
@@ -478,15 +494,16 @@ class SoftPromptLearner:
                         self.scheduler.step()
                 else:
                     (loss / max(1, self.cfg.grad_accum)).backward()
+                    gpu_mem_snapshot(prefix="after backward")
                     if ((step + 1) % self.cfg.grad_accum) == 0:
-                        raw_soft_g_cache = (self.emb.grad[self.soft_ids].abs().mean().item() if self.emb.grad is not None else 0.0)
-                        # 在 step/zero_grad 之前计算并缓存梯度范数
+                        raw_soft_g_cache = (self.soft_param.grad.abs().mean().item()
+                                            if self.soft_param.grad is not None else 0.0)
                         if self.cfg.max_grad_norm is not None:
-                            gnorm_cache = torch.nn.utils.clip_grad_norm_([self.emb], self.cfg.max_grad_norm).item()
+                            gnorm_cache = torch.nn.utils.clip_grad_norm_([self.soft_param], self.cfg.max_grad_norm).item()
                         else:
-                            gnorm_cache = (self.emb.grad.norm().item() if self.emb.grad is not None else 0.0)
-                        gnorm_soft_cache = (self.emb.grad[self.soft_ids].norm().item()
-                                            if self.emb.grad is not None else 0.0)
+                            gnorm_cache = (self.soft_param.grad.norm().item()
+                                           if self.soft_param.grad is not None else 0.0)
+                        gnorm_soft_cache = gnorm_cache
 
                         self.opt.step()
                         self.opt.zero_grad(set_to_none=True)
@@ -495,7 +512,7 @@ class SoftPromptLearner:
                 if (step % self.cfg.log_every) == 0:
                     lr = self.opt.param_groups[0]["lr"]
                     with torch.no_grad():
-                        cur = F.normalize(self.emb[self.soft_ids], dim=1)
+                        cur = F.normalize(self.soft_param, dim=1)
                         init = F.normalize(self.soft_init, dim=1)
                         cos_to_init = (cur * init).sum(dim=1).mean().item()
                         ortho_mse = (cur @ cur.t() - torch.eye(len(self.soft_ids), device=cur.device)).pow(2).mean().item()
@@ -515,7 +532,7 @@ class SoftPromptLearner:
                     metric = val_acc
                     if metric > best_metric:
                         best_metric = metric
-                        soft_vecs = self.emb[self.soft_ids].detach().cpu()
+                        soft_vecs = self.soft_param.detach().cpu()
                         save_prompt_ckpt(self.cfg.ckpt_best, {
                             "soft_tokens": self.soft_tokens,
                             "soft_vecs": soft_vecs,
@@ -526,8 +543,8 @@ class SoftPromptLearner:
                 if step >= self.cfg.max_steps:
                     break
 
-        # 保存最终 ckpt
-        soft_vecs = self.emb[self.soft_ids].detach().cpu()
+        # 保存最终 ckpt（只存软行子矩阵）
+        soft_vecs = self.soft_param.detach().cpu()
         save_prompt_ckpt(self.cfg.save_ckpt, {
             "soft_tokens": self.soft_tokens,
             "soft_vecs": soft_vecs,

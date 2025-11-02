@@ -100,7 +100,6 @@ def _print_and_save_confusion(cm, labels, out_dir, prefix):
         row = " ".join([f"{int(cm[i, j]):>8d}" for j in range(K)])
         print(f"{l:>10} | {row}")
 
-
 def run_one(model, processor, messages, max_new_tokens: int, label_space: List[str]) -> str:
     """Single end-to-end generation (greedy decoding)."""
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)

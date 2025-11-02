@@ -18,8 +18,8 @@ def build_args():
     p.add_argument('--dtype', type=str, default='auto', choices=['auto','bf16','fp16','fp32'])
     p.add_argument('--device_map', type=str, default='cuda:2')
     p.add_argument('--attn_impl', type=str, default='sdpa', choices=['sdpa','flash_attention_2'])
-    p.add_argument('--min_pixels', type=int, default=224)
-    p.add_argument('--max_pixels', type=int, default=1024)
+    p.add_argument('--min_pixels', type=int, default=224*224)
+    p.add_argument('--max_pixels', type=int, default=1440*1440)
 
 
     # inference
@@ -48,6 +48,7 @@ def build_args():
     p.add_argument('--sp_accum', type=int, default=1, help='梯度累积步数')
     p.add_argument('--sp_ckpt', type=str, default='prompt_ckpt.pt')
     p.add_argument('--sp_best', type=str, default='prompt_ckpt.best.pt')
+    p.add_argument('--sp_dropout', type=float, default=0.2, help='prompt dropout 概率')
     return p.parse_args()
 
 

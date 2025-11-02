@@ -13,7 +13,7 @@ from prompts import build_user_content, build_prompt_variant, build_instruction
 from retrieve_demo import DemoProvider
 from utils import set_seed, build_msgs
 from prompt_tuning.prompt_learner import SoftPromptLearner, TrainCfg
-from sp_utils import init_soft_tokens
+from sp_utils import init_soft_tokens,gpu_mem_snapshot,gpu_mem_reset_peak
 
 def label_to_target_json(label: str) -> str:
     # 与 parse_label_from_output 对齐：训练时让模型生成 {"label": "<cand>"}
@@ -47,6 +47,70 @@ def collate(samples, processor, labels, label_map, use_image, img_root, has_aspe
         "gold_label_str": gold
     }
 
+def find_transformer_layers(model):
+    # 常见路径（按优先级）
+    candidate_paths = [
+        "model.language_model.model.layers",  # 一些多模态模型
+        "language_model.model.layers",
+        "model.model.layers",                 # 常见
+        "model.layers",
+        "transformer.h",                      # GPT/LLM 风格
+    ]
+    for path in candidate_paths:
+        cur, ok = model, True
+        for attr in path.split("."):
+            if hasattr(cur, attr):
+                cur = getattr(cur, attr)
+            else:
+                ok = False
+                break
+        if ok and hasattr(cur, "__len__"):
+            return cur  # list-like of blocks
+
+    # 兜底：递归扫描，收集“像 transformer block 的子模块”
+    blocks = []
+    for module in model.modules():
+        if hasattr(module, "self_attn") or hasattr(module, "attention") or hasattr(module, "attn"):
+            # 尝试过滤掉最内层注意力模块，只要“包含注意力的更大一层”
+            parent = getattr(module, "parent", None)  # 可能没有 parent；仅作为提示
+            # 直接记录上层容器也可以；简单起见直接收模块本身
+            blocks.append(module)
+    # 如果扫不到，返回 None
+    return blocks if blocks else None
+
+def enable_gc_for_last_ratio(model, ratio=0.5):
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+
+    # 兼容式全局开启，使子模块具备 gc 能力
+    fn = getattr(model, "gradient_checkpointing_enable", None)
+    if fn:
+        try:
+            fn(gradient_checkpointing_kwargs={"use_reentrant": False})
+        except TypeError:
+            try:
+                fn(use_reentrant=False)
+            except TypeError:
+                fn()
+
+    layers = find_transformer_layers(model)
+    if not layers or not hasattr(layers, "__len__"):
+        print("[warn] 未找到 transformer 层列表，跳过按比例设置。")
+        return
+
+    n = len(layers)
+    start = int(n * (1 - float(ratio)))
+    start = max(0, min(n, start))
+
+    # 大多数 HF 模型在 block 上有这个标志位；若没有可以给它设属性
+    for i, block in enumerate(layers):
+        try:
+            setattr(block, "gradient_checkpointing", i >= start)
+        except Exception:
+            pass
+
+    print(f"[gc] enabled on last {n - start}/{n} layers (ratio={ratio:.2f})")
+
 def main():
     args = resolve_paths(build_args())
     set_seed(args.seed)
@@ -60,7 +124,11 @@ def main():
     dev_samples = dev_reader.read()
 
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model, torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
+    if dataset_name in ["t2017", "tumemo"]:
+        enable_gc_for_last_ratio(model, ratio=0.5)
+    print("model dtype",model.dtype)
     model.to(device).eval()
+    gpu_mem_snapshot(prefix="[after load ] ")
     processor = AutoProcessor.from_pretrained(args.model, min_pixels=args.min_pixels, max_pixels=args.max_pixels, use_fast=False)
 
     n_soft = int(os.getenv("SP_N_TOKENS", "0"))
@@ -83,6 +151,7 @@ def main():
     coll = lambda batch: collate(batch, processor, labels, label_map, use_image, args.img_dir, has_aspect, "STRICT", device=device)
     train_loader = DataLoader(train_samples, batch_size=getattr(args, "batch_size", 1), shuffle=True, collate_fn=coll)
     dev_loader = DataLoader(dev_samples, batch_size= 1, shuffle=False, collate_fn=coll)
+    gpu_mem_snapshot(prefix="[after collate] ")
     tr_cfg = TrainCfg(
         lr=float(getattr(args, "sp_lr", 1e-3)),
         max_steps=int(getattr(args, "sp_steps", 3000)),
