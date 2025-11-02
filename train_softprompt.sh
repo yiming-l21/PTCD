@@ -14,7 +14,7 @@ NPROC="${NPROC:-1}"
 
 ############################################
 MODEL="/home/lym/models/qwen2.5_vl"
-DATASETS="mvsa-s"   # 可改成 t2015 或 t2017
+DATASETS="t2015"   # 可改成 t2015 或 t2017
 DATA_DIR="datasets/${DATASETS}"
 IMG_DIR="datasets/${DATASETS}/imgs"
 
@@ -33,8 +33,7 @@ ARGS=(
   --sp_mode       generic
   --sp_lr         8e-4
   --sp_steps      1000
-  --sp_ckpt       ./ckpt/${DATASETS}_prompt_ckpt.pt
-  --sp_best     ./ckpt/${DATASETS}_prompt_ckpt.best.pt
+  --sp_ckpt      /home/lym/VLM-MSA/ckpt/${DATASETS}/
   --sp_dropout    0.20       # ★ 新增：训练时的 prompt-dropout 概率（评估自动关闭）
 )
 echo "[INFO] Launching single GPU on device(s): ${CUDA_VISIBLE_DEVICES}"

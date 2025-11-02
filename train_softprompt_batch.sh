@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=2,4,5,6,7
+export CUDA_VISIBLE_DEVICES=2,4,5
 # 数据集列表
-DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
+DATASETS=("tumemo")
 export SP_N_TOKENS=8
 
 train_script="src/prompt_tuning/train_soft_prompt.py"
@@ -62,10 +62,10 @@ while [ $current_idx -lt $NUM_DATASETS ]; do
       --train_tsv train_few1.tsv \
       --dev_tsv dev_few1.tsv \
       --dtype bf16 \
-      --min_pixels 50176 --max_pixels 2073600 \
+      --min_pixels 50176 --max_pixels 1048576 \
       --batch_size 4 \
       --sp_mode generic \
-      --sp_lr 8e-4 --sp_steps 1400 --sp_ckpt "./ckpt/${dataset}_prompt_ckpt.pt" --sp_best "./ckpt/${dataset}_prompt_ckpt.best.pt" \
+      --sp_lr 8e-4 --sp_steps 1000 --sp_ckpt "/home/lym/VLM-MSA/ckpt/${dataset}/" \
       > "$log_file" 2>&1 &
 
     pids+=("$!")  # 记录后台进程ID

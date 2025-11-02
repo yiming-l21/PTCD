@@ -124,8 +124,9 @@ def main():
     dev_samples = dev_reader.read()
 
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model, torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
-    if dataset_name in ["t2017", "tumemo"]:
-        enable_gc_for_last_ratio(model, ratio=0.5)
+    ratio4dataset={"t2017": 0.8, "t2015":0.3, "tumemo":0.7 }
+    if dataset_name in ["t2017", "tumemo", "t2015"]:
+        enable_gc_for_last_ratio(model, ratio=ratio4dataset[dataset_name])
     print("model dtype",model.dtype)
     model.to(device).eval()
     gpu_mem_snapshot(prefix="[after load ] ")

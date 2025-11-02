@@ -121,8 +121,13 @@ def build_msgs(
     
     n_soft = int(os.getenv("SP_N_TOKENS", "0"))
     soft_tokens = [f"<soft{i}>" for i in range(n_soft)]
-    soft_str = "".join(soft_tokens) if n_soft > 0 else ""
-    user_text = soft_str + user_text
+    # if n_soft > 0:
+    #     half = n_soft // 2
+    #     pre_soft = "".join(soft_tokens[:half])
+    #     post_soft = "".join(soft_tokens[half:])
+    #     user_text = f"{pre_soft}{user_text}{post_soft}"
+    pre_soft = "".join(soft_tokens) if n_soft > 0 else ""
+    user_text = f"{pre_soft}{user_text}"
     system_msg = {"role": "system", "content": instruction}
 
     if use_image and img_path:

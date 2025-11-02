@@ -2,16 +2,17 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
-
+import os
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, AutoProcessor
-from src.prompt_tuning.sp_utils import gpu_mem_snapshot
+#from sp_utils import gpu_mem_snapshot
 # --------- ckpt io ---------
 def save_prompt_ckpt(path: str, state: Dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
 
 
@@ -31,7 +32,7 @@ class TrainCfg:
     save_ckpt: str = "prompt_ckpt.pt"
     use_fp16: bool = True  # 若模型是bf16，会自动切到bf16并关闭GradScaler
 
-    eval_every: int = 200
+    eval_every: int = 100
     ckpt_best: str = "prompt_ckpt.best.pt"
     early_stop_patience: int = 5  # 可选：未实现
     monitor: str = "acc"          # "acc" 或 "loss"
@@ -177,7 +178,7 @@ class SoftPromptLearner:
 
         # 软提示初始化（把自然语言模板的 embedding 拷贝/平均到 <soft*> 行的初值）
         if self.cfg.init_prompt:
-            self._init_soft_from_text(self.cfg.init_prompt)
+            self._init_soft_from_gaussian(0, None)
 
         # 记录初始值用于正则/对比
         with torch.no_grad():
@@ -211,7 +212,27 @@ class SoftPromptLearner:
             return (self.min_lr / self.base_lr) + 0.5 * (1 - self.min_lr / self.base_lr) * (1 + math.cos(math.pi * t))
 
         return torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+    @torch.no_grad()
+    def _init_soft_from_gaussian(self, mean: float = 0.0, std: Optional[float] = None):
+        import math
+        emb_layer = self.model.get_input_embeddings()
+        # 取“基础表”以估计方差
+        if hasattr(emb_layer, "parametrizations") and hasattr(emb_layer.parametrizations, "weight"):
+            base_table = emb_layer.parametrizations.weight.original  # [V, H]
+        else:
+            base_table = emb_layer.weight  # [V, H]
 
+        # 若未显式指定 std，则用 embedding 权重的整体 std，退化兜底 0.02（CLIP 常见初始化量级）
+        if std is None:
+            try:
+                est = float(base_table.std().item())
+            except Exception:
+                est = 0.02
+            std = est if math.isfinite(est) and est > 1e-6 else 0.02
+
+        # 直接在可训练参数上采样
+        self.soft_param.normal_(mean=mean, std=std)
+        print(f"[init] soft prompts initialized from Gaussian N({mean:.3f}, {std:.3f}^2)")
     # ---------- 用自然语言模板初始化软提示 ----------
     @torch.no_grad()
     def _init_soft_from_text(self, prompt: str):
@@ -451,7 +472,7 @@ class SoftPromptLearner:
 
         while step < self.cfg.max_steps:
             for batch in loader:
-                gpu_mem_snapshot(prefix="before forward")
+                #gpu_mem_snapshot(prefix="before forward")
                 targets = [target_builder(lbl) for lbl in batch["gold_label_str"]]
                 target_ids = [self.tok(t, add_special_tokens=False)["input_ids"] for t in targets]
                 input_ids2, attn2, labels, others = self._pack_batch(batch["hf_inputs"], target_ids)
@@ -460,9 +481,9 @@ class SoftPromptLearner:
                 self._apply_prompt_dropout(p=0.2)
 
                 with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
-                    gpu_mem_snapshot(prefix="before forward")
+                    #gpu_mem_snapshot(prefix="before forward")
                     out = self.model(input_ids=input_ids2, attention_mask=attn2, labels=labels, **others)
-                    gpu_mem_snapshot(prefix="after model forward")
+                    #gpu_mem_snapshot(prefix="after model forward")
                     loss = out.loss
 
                     # 正则项（作用于 soft_param）
@@ -473,10 +494,10 @@ class SoftPromptLearner:
                     S = F.normalize(cur, dim=1)      # (n_soft, H)
                     ortho = (S @ S.t() - torch.eye(len(self.soft_ids), device=S.device)).pow(2).mean()
                     loss = loss + lambda_anchor * anchor_l2 + lambda_ortho * ortho
-                gpu_mem_snapshot(prefix="after forward")
+                #gpu_mem_snapshot(prefix="after forward")
                 if self.scaler.is_enabled():
                     self.scaler.scale(loss / max(1, self.cfg.grad_accum)).backward()
-                    gpu_mem_snapshot(prefix="after backward")
+                    #gpu_mem_snapshot(prefix="after backward")
                     if ((step + 1) % self.cfg.grad_accum) == 0:
                         self.scaler.unscale_(self.opt)
                         raw_soft_g_cache = (self.soft_param.grad.abs().mean().item()
@@ -494,7 +515,7 @@ class SoftPromptLearner:
                         self.scheduler.step()
                 else:
                     (loss / max(1, self.cfg.grad_accum)).backward()
-                    gpu_mem_snapshot(prefix="after backward")
+                    #gpu_mem_snapshot(prefix="after backward")
                     if ((step + 1) % self.cfg.grad_accum) == 0:
                         raw_soft_g_cache = (self.soft_param.grad.abs().mean().item()
                                             if self.soft_param.grad is not None else 0.0)
@@ -530,23 +551,14 @@ class SoftPromptLearner:
                     val_acc, val_lat = self.eval_like_infer_generation(dev_loader, self.label_space)
                     print(f"[soft-prompt] eval@{step}: val_acc={val_acc:.4f} avg_latency_ms={val_lat:.1f}", flush=True)
                     metric = val_acc
-                    if metric > best_metric:
-                        best_metric = metric
-                        soft_vecs = self.soft_param.detach().cpu()
-                        save_prompt_ckpt(self.cfg.ckpt_best, {
-                            "soft_tokens": self.soft_tokens,
-                            "soft_vecs": soft_vecs,
-                        })
-                        print(f"[soft-prompt] new best -> saved {self.cfg.ckpt_best}", flush=True)
+                    best_metric = metric
+                    soft_vecs = self.soft_param.detach().cpu()
+                    save_prompt_ckpt(self.cfg.save_ckpt+f"prompt_ckpt_{step}.pt", {
+                        "soft_tokens": self.soft_tokens,
+                        "soft_vecs": soft_vecs,
+                    })
+                    print(f"[soft-prompt] new best -> saved prompt_ckpt_{step}.pt", flush=True)
 
                 step += 1
                 if step >= self.cfg.max_steps:
                     break
-
-        # 保存最终 ckpt（只存软行子矩阵）
-        soft_vecs = self.soft_param.detach().cpu()
-        save_prompt_ckpt(self.cfg.save_ckpt, {
-            "soft_tokens": self.soft_tokens,
-            "soft_vecs": soft_vecs,
-        })
-        print(f"[soft-prompt] saved: {self.cfg.save_ckpt}", flush=True)
