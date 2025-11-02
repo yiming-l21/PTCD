@@ -100,39 +100,33 @@ def _print_and_save_confusion(cm, labels, out_dir, prefix):
         row = " ".join([f"{int(cm[i, j]):>8d}" for j in range(K)])
         print(f"{l:>10} | {row}")
 
-def run_one(model, processor, messages, max_new_tokens: int, label_space: List[str]) -> str:
-    """Single end-to-end generation (greedy decoding)."""
+@torch.inference_mode()
+def run_one(
+    model,
+    processor,
+    messages,
+    max_new_tokens: int,
+    label_space: List[str],
+) -> str:
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = process_vision_info(messages)
-    inputs = processor(
-        text=[text],
-        images=image_inputs,
-        videos=video_inputs,
-        padding=True,
-        return_tensors="pt",
-    ).to(model.device)
+    images, videos = process_vision_info(messages)
+    inputs = processor(text=[text], images=images, videos=videos, padding=True, return_tensors="pt").to(model.device)
     with torch.inference_mode():
         out = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             num_beams=1,
+            return_dict_in_generate=True,
+            output_scores=True,  # 拿每步 logits
         )
-
-    # Determine split point using attention_mask
-    attn = inputs.get("attention_mask", None)
-    if attn is not None:
-        cut = int(attn.sum(dim=1)[0].item())
-    else:
-        pad_id = processor.tokenizer.pad_token_id
-        cut = int((inputs.input_ids != pad_id).sum(dim=1)[0].item())
-
-    gen_ids = out[0][cut:]
+    gen_ids = []
+    for s in out.scores:  # s: [B, vocab]
+        probs = torch.softmax(s.float(), dim=-1)
+        token = probs.argmax(dim=-1) 
+        gen_ids.append(token)
+    gen_ids = torch.stack(gen_ids, dim=1)[0]  # [new_len]
     text_out = processor.decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-    # Truncate to first JSON block if applicable
-    j = text_out.find("}")
-    if j >= 0:
-        text_out = text_out[: j + 1]
     return text_out
 
 def iter_with_clean_progress(
