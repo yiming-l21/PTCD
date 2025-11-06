@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=5
 ############################################
 # 可改区：设备/soft tokens/并行卡数
 ############################################
@@ -14,7 +14,7 @@ NPROC="${NPROC:-1}"
 
 ############################################
 MODEL="/home/lym/models/qwen2.5_vl"
-DATASETS="t2015"   # 可改成 t2015 或 t2017
+DATASETS="mvsa-s"   # 可改成 t2015 或 t2017
 DATA_DIR="datasets/${DATASETS}"
 IMG_DIR="datasets/${DATASETS}/imgs"
 

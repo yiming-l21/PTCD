@@ -11,12 +11,11 @@ from dataset_info import get_labels_and_template
 from params import build_args, resolve_paths
 from prompts import build_user_content, build_prompt_variant, build_instruction
 from retrieve_demo import DemoProvider
-from utils import set_seed, build_msgs
+from utils import set_seed, build_msgs, parse_label_from_output
 from prompt_tuning.prompt_learner import SoftPromptLearner, TrainCfg
-from sp_utils import init_soft_tokens,gpu_mem_snapshot,gpu_mem_reset_peak
+from sp_utils import init_soft_tokens, init_visual_soft_tokens, gpu_mem_snapshot, gpu_mem_reset_peak
 
 def label_to_target_json(label: str) -> str:
-    # 与 parse_label_from_output 对齐：训练时让模型生成 {"label": "<cand>"}
     return f'{{"label": "{label}"}}'
 
 def collate(samples, processor, labels, label_map, use_image, img_root, has_aspect, tpl, device="cpu"):
@@ -48,13 +47,12 @@ def collate(samples, processor, labels, label_map, use_image, img_root, has_aspe
     }
 
 def find_transformer_layers(model):
-    # 常见路径（按优先级）
     candidate_paths = [
-        "model.language_model.model.layers",  # 一些多模态模型
+        "model.language_model.model.layers",
         "language_model.model.layers",
-        "model.model.layers",                 # 常见
+        "model.model.layers",
         "model.layers",
-        "transformer.h",                      # GPT/LLM 风格
+        "transformer.h",
     ]
     for path in candidate_paths:
         cur, ok = model, True
@@ -65,24 +63,18 @@ def find_transformer_layers(model):
                 ok = False
                 break
         if ok and hasattr(cur, "__len__"):
-            return cur  # list-like of blocks
+            return cur
 
-    # 兜底：递归扫描，收集“像 transformer block 的子模块”
     blocks = []
     for module in model.modules():
         if hasattr(module, "self_attn") or hasattr(module, "attention") or hasattr(module, "attn"):
-            # 尝试过滤掉最内层注意力模块，只要“包含注意力的更大一层”
-            parent = getattr(module, "parent", None)  # 可能没有 parent；仅作为提示
-            # 直接记录上层容器也可以；简单起见直接收模块本身
             blocks.append(module)
-    # 如果扫不到，返回 None
     return blocks if blocks else None
 
 def enable_gc_for_last_ratio(model, ratio=0.5):
     if hasattr(model, "config"):
         model.config.use_cache = False
 
-    # 兼容式全局开启，使子模块具备 gc 能力
     fn = getattr(model, "gradient_checkpointing_enable", None)
     if fn:
         try:
@@ -102,7 +94,6 @@ def enable_gc_for_last_ratio(model, ratio=0.5):
     start = int(n * (1 - float(ratio)))
     start = max(0, min(n, start))
 
-    # 大多数 HF 模型在 block 上有这个标志位；若没有可以给它设属性
     for i, block in enumerate(layers):
         try:
             setattr(block, "gradient_checkpointing", i >= start)
@@ -123,45 +114,85 @@ def main():
     dev_reader = MSADataset(args, args.data_dir / args.dev_tsv, dataset_name=dataset_name, label_map=label_map)
     dev_samples = dev_reader.read()
 
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model, torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32)
+    # 加载模型
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        args.model, 
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        device_map=device
+    )
     ratio4dataset={"t2017": 0.8, "t2015":0.3, "tumemo":0.7 }
     if dataset_name in ["t2017", "tumemo", "t2015"]:
         enable_gc_for_last_ratio(model, ratio=ratio4dataset[dataset_name])
-    print("model dtype",model.dtype)
-    model.to(device).eval()
+    print("model dtype", model.dtype)
     gpu_mem_snapshot(prefix="[after load ] ")
-    processor = AutoProcessor.from_pretrained(args.model, min_pixels=args.min_pixels, max_pixels=args.max_pixels, use_fast=False)
 
-    n_soft = int(os.getenv("SP_N_TOKENS", "0"))
-    soft_tokens, soft_ids = init_soft_tokens(processor.tokenizer, model, n_soft)
-    print(f"[*] soft tokens: {soft_tokens}")
+    # 加载processor
+    processor = AutoProcessor.from_pretrained(
+        args.model, 
+        min_pixels=args.min_pixels, 
+        max_pixels=args.max_pixels, 
+        use_fast=False
+    )
 
+    # 初始化文本软提示
+    n_text_sp = int(os.getenv("SP_N_TOKENS", "16"))
+    soft_tokens, soft_ids = init_soft_tokens(processor.tokenizer, model, n_text_sp)
+    print(f"[*] 文本软提示: {soft_tokens} (数量: {n_text_sp})")
+
+    # 视觉配置
     use_image = (args.img_dir is not None) and (not args.no_img)
+    n_visual_sp = int(os.getenv("VISUAL_SP_N_TOKENS", "8"))
+    print(f"[*] 视觉软提示数量: {n_visual_sp} (使用图像: {use_image})")
+
     has_aspect = getattr(
         args, "has_aspect",
         True if "fine" in str(tmpl).lower() else ("t2015" in dataset_name or "t2017" in dataset_name or "masad" in dataset_name)
     )
 
-    # Determine template variant(s)
-    prompt_variants = build_prompt_variant()
-
-    # RAG inference
-    demo = DemoProvider.from_env(args, dataset_name=dataset_name, image_base=Path(args.data_dir) / "imgs")
-
-
-    coll = lambda batch: collate(batch, processor, labels, label_map, use_image, args.img_dir, has_aspect, "STRICT", device=device)
-    train_loader = DataLoader(train_samples, batch_size=getattr(args, "batch_size", 1), shuffle=True, collate_fn=coll)
-    dev_loader = DataLoader(dev_samples, batch_size= 1, shuffle=False, collate_fn=coll)
+    # 构建DataLoader
+    coll = lambda batch: collate(
+        batch, processor, labels, label_map, use_image, args.img_dir, has_aspect, "STRICT", device=device
+    )
+    train_loader = DataLoader(
+        train_samples, 
+        batch_size=getattr(args, "batch_size", 1), 
+        shuffle=True, 
+        collate_fn=coll
+    )
+    dev_loader = DataLoader(
+        dev_samples, 
+        batch_size=1, 
+        shuffle=False, 
+        collate_fn=coll
+    )
     gpu_mem_snapshot(prefix="[after collate] ")
+
+    # 训练配置
     tr_cfg = TrainCfg(
         lr=float(getattr(args, "sp_lr", 1e-3)),
         max_steps=int(getattr(args, "sp_steps", 3000)),
         grad_accum=int(getattr(args, "sp_accum", 1)),
         save_ckpt=str(getattr(args, "sp_ckpt", "prompt_ckpt.pt")),
         ckpt_best=getattr(args, "sp_best", "prompt_ckpt.best.pt"),
+        warmup_steps=int(getattr(args, "sp_warmup", 200)),
+        step_ckpt_dir=getattr(args, "step_ckpt_dir", None),
+        save_every_step=int(getattr(args, "save_every_step", 100)),
     )
-    learner = SoftPromptLearner(model, processor, ["STRICT"], demo, labels, tr_cfg, device)
 
+    # 初始化Learner（包含视觉Prompt）
+    learner = SoftPromptLearner(
+        model=model,
+        processor=processor,
+        template_variants=["STRICT"],
+        demo_provider=DemoProvider.from_env(args, dataset_name=dataset_name, image_base=Path(args.data_dir) / "imgs"),
+        label_space=labels,
+        train_cfg=tr_cfg,
+        device=device,
+        use_image=use_image,
+        n_visual_sp=n_visual_sp
+    )
+
+    # 开始训练
     learner.fit(train_loader, dev_loader, target_builder=label_to_target_json)
 
 if __name__ == "__main__":
