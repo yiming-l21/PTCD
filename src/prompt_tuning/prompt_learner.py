@@ -61,7 +61,7 @@ def load_prompt_ckpt(path: str, map_location="cpu") -> Dict:
 class VisualPromptCfg:
     n_tokens: int = 8
     mode: str = "post"
-    cond_pool: bool = True
+    cond_pool: bool = False
     lr: float = 8e-4
     weight_decay: float = 0.01
     dropout_p: float = 0.0
@@ -77,7 +77,7 @@ class _VisualPrefixCore(nn.Module):
         self,
         n_tokens: int,
         dim: int,
-        cond_pool: bool = True,
+        cond_pool: bool = False,
         dropout_p: float = 0.0,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
@@ -598,8 +598,8 @@ class SoftPromptLearner:
         if not self.text_only and self.use_image and self.n_visual_sp > 0:
             self.vp_cfg = VisualPromptCfg(
                 n_tokens=self.n_visual_sp,
-                cond_pool=True,
-                lr=self.cfg.lr * 10.0,
+                cond_pool=False,
+                lr=self.cfg.lr * 0.5,
                 weight_decay=self.cfg.weight_decay,
                 dropout_p=float(getattr(self.cfg, "visual_sp_dropout", 0.0)),
                 reg_anchor=1e-3,

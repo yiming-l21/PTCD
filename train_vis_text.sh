@@ -8,9 +8,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
 # 文本软提示数量（默认8个，可按需调整）
 export SP_N_TOKENS="${SP_N_TOKENS:-8}"
 # 视觉软提示数量（默认8个，建议4-16个）
-export VISUAL_SP_N_TOKENS="${VISUAL_SP_N_TOKENS:-32}"
+export VISUAL_SP_N_TOKENS="${VISUAL_SP_N_TOKENS:-16}"
 export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-0}"  # 1=仅文本，0=不单独启用
-export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-1}"  # 1=仅视觉，0=不单独启用
+export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-0}"  # 1=仅视觉，0=不单独启用
 # 其他环境变量
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -46,7 +46,7 @@ ARGS=(
   --sp_lr         1e-4  # 文本Prompt学习率（视觉Prompt自动为 8e-4 * 1.5 = 1.2e-3）
   --sp_steps      1500  # 最大训练步数
   --sp_accum      1     # 梯度累积步数（显存不足时调大，如2/4）
-  --sp_warmup     200   # 学习率热身步数（默认200，建议为总步数的10%-20%）
+  --sp_warmup     100   # 学习率热身步数（默认200，建议为总步数的10%-20%）
   --sp_ckpt       "$CKPT_DIR"  # 主checkpoint保存目录（最佳模型+最终模型）
   --step_ckpt_dir "$STEP_CKPT_DIR"  # 新增：按步保存checkpoint的目录
   --save_every_step "$SAVE_EVERY_STEP"  # 新增：每隔多少步保存一次
