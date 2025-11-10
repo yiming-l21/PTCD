@@ -29,12 +29,15 @@ from src.prompt_tuning.prompt_learner import load_prompt_ckpt
 from logs.logs import _finalize_and_save,_resolve_pred_field,_write_rag_debug_and_stats
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from transformers.utils import logging as hf_logging  # noqa: E402
+from src.infer import (
+    prepare_inputs_from_messages, filter_to_gen_allow,
+    generate_scores_argmax, prompt_eval_guards
+)
 hf_logging.set_verbosity_error()
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
-
 def _maybe_init_prompt(model, processor, label_space):
-    import os, torch
+    import os, math, torch
 
     def _is_rank0():
         try:
@@ -46,13 +49,13 @@ def _maybe_init_prompt(model, processor, label_space):
     LOG_ON = int(os.getenv("VIS_SP_LOG", "1")) > 0 and _is_rank0()
     LOG_N  = int(os.getenv("VIS_SP_LOG_N", "3"))
     STRICT = int(os.getenv("VIS_SP_STRICT", "1")) > 0
-    ASSUME_B1 = int(os.getenv("VIS_SP_ASSUME_B1", "1")) > 0  # 2D+无Ns时按B=1处理
 
     ckpt_path = os.getenv("SOFT_PROMPT_CKPT", "").strip()
     if not ckpt_path or not os.path.exists(ckpt_path):
         if LOG_ON: print("[WARN] 未指定或不存在软提示checkpoint，跳过加载", flush=True)
         return None
 
+    # 载入 ckpt（保持 map_location=model.device）
     try:
         st = load_prompt_ckpt(ckpt_path, map_location=model.device)
     except Exception as e:
@@ -62,21 +65,27 @@ def _maybe_init_prompt(model, processor, label_space):
     text_only   = int(st.get("text_only", 0) or 0)
     visual_only = int(st.get("visual_only", 0) or 0)
 
-    # --- 文本软提示：写回 embedding
+    # =========================================================
+    # 文本软提示：将 ckpt 中的 soft_vecs 写回到 embedding
+    # =========================================================
     if (not visual_only) and st.get("soft_tokens") is not None and st.get("soft_vecs") is not None:
         soft_tokens = list(st["soft_tokens"])
         soft_vecs   = st["soft_vecs"].to(model.device)
-        missing = [t for t in soft_tokens if processor.tokenizer.convert_tokens_to_ids(t) == processor.tokenizer.unk_token_id]
+
+        missing = [t for t in soft_tokens
+                   if processor.tokenizer.convert_tokens_to_ids(t) == processor.tokenizer.unk_token_id]
         if missing:
             processor.tokenizer.add_special_tokens({"additional_special_tokens": missing})
             model.resize_token_embeddings(len(processor.tokenizer))
             if LOG_ON: print(f"[*] tokenizer 新增 {len(missing)} 个软提示 token 并已 resize", flush=True)
+
         ids = processor.tokenizer.convert_tokens_to_ids(soft_tokens)
         if len(ids) != soft_vecs.shape[0]:
             msg = f"[ERROR] 文本软提示token数与向量数不匹配：{len(ids)} vs {soft_vecs.shape[0]}"
             print(msg, flush=True)
             if STRICT: raise RuntimeError(msg)
             return None
+
         with torch.no_grad():
             emb = model.get_input_embeddings().weight
             emb[torch.tensor(ids, device=emb.device, dtype=torch.long)] = soft_vecs.to(emb.dtype)
@@ -84,154 +93,145 @@ def _maybe_init_prompt(model, processor, label_space):
     else:
         if LOG_ON: print(f"[*] 跳过文本软提示（visual_only={visual_only}）", flush=True)
 
-    # --- 视觉软提示：注册插入
-    if text_only or st.get("visual_sp_vecs") is None or int(st.get("visual_sp_n_tokens", 0)) <= 0:
-        if LOG_ON: print(f"[*] 跳过视觉软提示（text_only={text_only}）", flush=True)
+    # =========================================================
+    # 视觉软提示（通过 VisualPrompt 的 forward_hook）
+    # =========================================================
+    if text_only:
+        if LOG_ON: print(f"[*] 跳过视觉软提示（因为 ckpt 标记 text_only=1）", flush=True)
         return True
 
-    visual_vecs = st["visual_sp_vecs"].to(model.device)  # [n_sp, 1280]
-    n_sp = int(st["visual_sp_n_tokens"])
-    if visual_vecs.shape != (n_sp, 1280):
-        msg = f"[ERROR] 视觉软提示形状非法：{tuple(visual_vecs.shape)}，需 (n_sp,1280)"
-        print(msg, flush=True)
-        if STRICT: raise RuntimeError(msg)
-        return None
+    vp_state = st.get("vp_state", None)
 
-    # 找到 visual.merger
-    merger = None
-    cur = getattr(model, "model", None)
-    if cur is not None:
-        cur = getattr(cur, "visual", None)
-        if cur is not None:
-            merger = getattr(cur, "merger", None)
-    if merger is None:
-        for m in model.modules():
-            if hasattr(m, "forward") and "merger" in m.__class__.__name__.lower():
-                merger = m; break
-    if merger is None:
-        msg = "[ERROR] 未找到视觉 merger 模块，无法注册视觉软提示 hook"
-        print(msg, flush=True)
-        if STRICT: raise RuntimeError(msg)
-        return None
+    if isinstance(vp_state, dict) and "core" in vp_state and isinstance(vp_state["core"], dict):
+        vp_state = vp_state["core"]
 
-    # dtype 对齐
+    if not (isinstance(vp_state, dict) and any(isinstance(v, torch.Tensor) for v in vp_state.values())):
+        if LOG_ON: print("[*] 跳过视觉软提示（ckpt 无 vp_state.* 张量）", flush=True)
+        return True
+
+    # ====== 1) prefix 统计 ======
+    pre = vp_state["prefix"].to(model.device)
     try:
-        pe = getattr(model.model.visual, "patch_embedding", None)
-        vis_dtype = (pe.weight.dtype if (pe is not None and hasattr(pe, "weight")) else next(model.parameters()).dtype)
+        m = float(pre.mean().item()); s = float(pre.std().item()); nrm = float(pre.norm().item())
+        print(f"[*] vp_prefix stats: mean={m:.3e} std={s:.3e} norm={nrm:.3e}")
+        if not hasattr(model, "_vp_prev_prefix"):
+            model._vp_prev_prefix = pre.detach().clone()
+            print("[*] vp_prefix Δ: (first ckpt) --")
+        else:
+            prev = model._vp_prev_prefix
+            l2  = float((pre - prev).pow(2).sum().sqrt().item())
+            cos = float(torch.nn.functional.cosine_similarity(pre.view(-1), prev.view(-1), dim=0).item())
+            print(f"[*] vp_prefix Δ vs prev: L2={l2:.3e} cos={cos:.6f}")
+            model._vp_prev_prefix = pre.detach().clone()
     except Exception:
-        vis_dtype = next(model.parameters()).dtype
-    visual_vecs = visual_vecs.to(dtype=vis_dtype)
+        pass
 
-    model._visual_sp_debug = {
-        "calls": 0, "last_B": None, "n_sp": n_sp, "vis_dtype": str(vis_dtype),
-        "last_before_shape": None, "last_after_shape": None, "max_abs_diff": None,
-    }
+    # ====== 2) 推理端旋钮：VP_GAIN / VP_NTOK ======
+    try:
+        gain = float(os.getenv("VP_GAIN", "1.0"))
+        if math.isfinite(gain) and gain != 1.0:
+            pre = pre.mul(gain)
+            if LOG_ON: print(f"[*] apply VP_GAIN={gain:g} -> scaled visual prefix", flush=True)
+    except Exception:
+        pass
 
-    def _pre_hook(module, inputs, kwargs):
-        if not inputs: return None
-        x = inputs[0] if (isinstance(inputs, (list, tuple)) and len(inputs) >= 1) else None
+    try:
+        n_override = os.getenv("VP_NTOK", "").strip()
+        if n_override.isdigit():
+            n_override = int(n_override)
+            if n_override > 0:
+                if n_override <= pre.size(0):
+                    pre = pre[:n_override, :]
+                else:
+                    rep = (n_override + pre.size(0) - 1) // pre.size(0)
+                    pre = pre.repeat(rep, 1)[:n_override, :]
+                if LOG_ON: print(f"[*] override n_sp by VP_NTOK={n_override}", flush=True)
+    except Exception:
+        pass
 
-        # try kw/inputs 提取 Ns（THW 或 lengths）
-        Ns = None
-        thw_keys = ("image_grid_thw", "grid_thw", "thw")
-        len_keys = ("tokens_per_image", "lengths", "image_lengths")
-        for k in thw_keys:
-            t = kwargs.get(k, None)
-            if torch.is_tensor(t) and t.dim() == 2 and t.size(-1) == 3:
-                Ns = (t.to(dtype=torch.int64).prod(dim=1)).tolist(); break
-        if Ns is None:
-            for k in len_keys:
-                t = kwargs.get(k, None)
-                if torch.is_tensor(t) and t.dim() == 1:
-                    Ns = t.to(dtype=torch.int64).tolist(); break
-        if Ns is None and isinstance(inputs, (list, tuple)):
-            for t in inputs[1:5]:
-                if torch.is_tensor(t) and t.dim() == 2 and t.size(-1) == 3:
-                    Ns = (t.to(dtype=torch.int64).prod(dim=1)).tolist(); break
-                if torch.is_tensor(t) and t.dim() == 1:
-                    Ns = t.to(dtype=torch.int64).tolist(); break
+    # ====== 3) cond_pool 对齐（读不到就默认 True，与训练日志一致） ======
+    trained_cond = st.get("vp_cfg", {}).get("cond_pool", None)
+    if trained_cond is None:
+        # 更稳健：看有没有“adapter/cond/shift”相关参数
+        has_adapter = any(("adapter" in k) or ("cond" in k) or ("shift" in k) for k in vp_state.keys())
+        trained_cond = True if has_adapter else True  # 默认 True
+    else:
+        trained_cond = bool(trained_cond)
 
-        # 3D：直接 (B,N,1280) 前拼
-        if torch.is_tensor(x) and x.dim() == 3 and x.size(-1) == 1280:
-            B, N, D = x.shape
-            sp = visual_vecs.unsqueeze(0).expand(B, -1, -1)
-            new_first = torch.cat([sp, x], dim=1)
-            dbg = model._visual_sp_debug; dbg["calls"] += 1; dbg["last_B"] = int(B)
-            dbg["last_before_shape"] = (int(B), int(N), int(D))
-            dbg["last_after_shape"]  = (int(new_first.size(0)), int(new_first.size(1)), int(new_first.size(2)))
-            with torch.no_grad():
-                head = new_first[:, :n_sp, :]; mad = (head - sp).abs().max().item() if head.numel() > 0 else 0.0
-            dbg["max_abs_diff"] = float(mad)
-            if LOG_ON and dbg["calls"] <= LOG_N:
-                print(f"[VIS-SP/3D][{dbg['calls']}] before={(B,N,D)} add=(B,{n_sp},1280) -> after={tuple(dbg['last_after_shape'])} max_abs_diff={mad:.3e}", flush=True)
-            if STRICT:
-                assert new_first.size(1) == N + n_sp and mad <= 1e-5
-            return ((new_first,) + inputs[1:], kwargs)
+    use_cond = int(os.getenv("VP_COND_POOL", "1" if trained_cond else "0")) > 0
+    if LOG_ON: print(f"[*] infer cfg: cond_pool={use_cond} (trained={trained_cond})", flush=True)
 
-        # 2D：有 Ns → 按 batch 拆分后逐样本前拼
-        if torch.is_tensor(x) and x.dim() == 2 and x.size(-1) == 1280 and (Ns is not None):
-            tokens_total, D = x.shape
-            sNs = sum(Ns)
-            if sNs != tokens_total:
-                if LOG_ON and model._visual_sp_debug["calls"] < LOG_N:
-                    print(f"[VIS-SP/2D][SKIP] sum(Ns)={sNs} != tokens={tokens_total}", flush=True)
-                if STRICT: raise RuntimeError(f"2D 拆分失败：sum(Ns)={sNs} vs tokens={tokens_total}")
-                return None
-            chunks, off = [], 0
-            for nb in Ns:
-                seg = x[off:off+nb, :]
-                sp  = visual_vecs.to(x.dtype).reshape(n_sp, 1280)
-                chunks.append(torch.cat([sp, seg], dim=0))
-                off += nb
-            new_first = torch.cat(chunks, dim=0)
-            dbg = model._visual_sp_debug; dbg["calls"] += 1
-            dbg["last_B"] = int(len(Ns))
-            dbg["last_before_shape"] = (int(tokens_total), int(D))
-            dbg["last_after_shape"]  = (int(new_first.size(0)), int(new_first.size(1)))
-            with torch.no_grad():
-                mad = (new_first[:n_sp, :] - visual_vecs.to(new_first.dtype)).abs().max().item()
-            dbg["max_abs_diff"] = float(mad)
-            if LOG_ON and dbg["calls"] <= LOG_N:
-                print(f"[VIS-SP/2D][{dbg['calls']}] before={(tokens_total,D)} sum(Ns)={sNs} B={len(Ns)} add_each={n_sp} -> after={tuple(dbg['last_after_shape'])} max_abs_diff={mad:.3e}", flush=True)
-            if STRICT:
-                expect = tokens_total + len(Ns) * n_sp
-                assert new_first.size(0) == expect and mad <= 1e-5
-            return ((new_first,) + inputs[1:], kwargs)
-
-        # 2D：无 Ns 且允许 B=1 兜底 → 直接在前面拼 n_sp
-        if torch.is_tensor(x) and x.dim() == 2 and x.size(-1) == 1280 and Ns is None and ASSUME_B1:
-            tokens_total, D = x.shape
-            sp = visual_vecs.to(x.dtype).reshape(n_sp, 1280)
-            new_first = torch.cat([sp, x], dim=0)  # (n_sp+tokens_total,1280)
-            dbg = model._visual_sp_debug; dbg["calls"] += 1
-            dbg["last_B"] = 1
-            dbg["last_before_shape"] = (int(tokens_total), int(D))
-            dbg["last_after_shape"]  = (int(new_first.size(0)), int(new_first.size(1)))
-            with torch.no_grad():
-                mad = (new_first[:n_sp, :] - sp).abs().max().item()
-            dbg["max_abs_diff"] = float(mad)
-            if LOG_ON and dbg["calls"] <= LOG_N:
-                print(f"[VIS-SP/2D-B1][{dbg['calls']}] before={(tokens_total,D)} assume_B=1 add={n_sp} -> after={tuple(dbg['last_after_shape'])} max_abs_diff={mad:.3e}", flush=True)
-            if STRICT:
-                assert new_first.size(0) == tokens_total + n_sp and mad <= 1e-5
-            return ((new_first,) + inputs[1:], kwargs)
-
-        # 其他：打印一次签名
-        if LOG_ON and model._visual_sp_debug["calls"] < LOG_N:
-            def _pp(v):
-                if torch.is_tensor(v): return f"Tensor{tuple(v.shape)} dtype={v.dtype}"
-                if isinstance(v, (list, tuple)): return [ _pp(t) for t in v[:8] ] + (["..."] if len(v) > 8 else [])
-                if isinstance(v, dict): return {k: _pp(val) for k, val in list(v.items())[:8]}
-                return repr(type(v).__name__)
-            print(f"[VIS-SP][SKIP] unexpected shape={_pp(x)} (no Ns) inputs_sig={_pp(inputs)} kwargs_sig={_pp(kwargs)}", flush=True)
+    # ====== 4) 构建 VisualPrompt，注册 hook ======
+    try:
+        from src.prompt_tuning.prompt_learner import VisualPrompt, VisualPromptCfg
+    except Exception as e:
+        print(f"[ERROR] 无法导入训练时的 VisualPrompt：{e}", flush=True)
+        if STRICT: raise
         return None
 
-    h_merger = merger.register_forward_pre_hook(_pre_hook, with_kwargs=True)
-    if not hasattr(model, "_visual_sp_handle"): model._visual_sp_handle = []
-    model._visual_sp_handle.append(h_merger)
-    if LOG_ON: print(f"[*] 视觉软提示 pre_hook 已注册：n_sp={n_sp}, dtype={vis_dtype}, 插入点=visual.merger 前", flush=True)
+    n_sp = int(pre.shape[0])
+    vp_cfg = VisualPromptCfg(
+        n_tokens=n_sp,
+        cond_pool=bool(use_cond),
+        dropout_p=0.0,  # 推理关闭 dropout
+    )
+
+    try:
+        vp = VisualPrompt(model, vp_cfg)
+    except Exception as e:
+        print(f"[ERROR] 创建 VisualPrompt 失败：{e}", flush=True)
+        if STRICT: raise
+        return None
+
+    # ====== 5) 恢复完整权重（prefix + adapter）：手动筛键 + 统一 dtype/device；不传 strict ======
+    try:
+        # 统一到当前 device / dtype
+        _vp_state = {}
+        for k, v in vp_state.items():
+            if torch.is_tensor(v):
+                _vp_state[k] = v.to(model.device, dtype=pre.dtype)
+            else:
+                _vp_state[k] = v
+
+        # 仅加载模型里真正存在且形状一致的键（适配你自定义的 load_state_dict 无 strict）
+        cur_state = vp.state_dict()
+        loadable = {}
+        skipped = []
+        for k, v in _vp_state.items():
+            if k in cur_state and torch.is_tensor(cur_state[k]) and torch.is_tensor(v) and cur_state[k].shape == v.shape:
+                loadable[k] = v
+            else:
+                skipped.append(k)
+
+        if loadable:
+            vp.load_state_dict(loadable)  # 不传 strict，避免报错
+            if LOG_ON:
+                print(f"[*] VisualPrompt 权重已恢复：{len(loadable)} 项；跳过 {len(skipped)} 项")
+                if len(skipped) and LOG_ON:
+                    # 只打印前若干个跳过项，防止刷屏
+                    print("[*] skipped keys (head):", skipped[:8])
+        else:
+            print("[WARN] 没有任何可加载到 VisualPrompt 的键，回退到仅 prefix", flush=True)
+            vp.load_state_dict({"prefix": pre})
+
+    except Exception as e:
+        print(f"[WARN] 加载 vp_state 失败（回退仅 prefix）：{e}", flush=True)
+        try:
+            vp.load_state_dict({"prefix": pre})
+        except Exception as ee:
+            print(f"[ERROR] 连仅 prefix 的恢复也失败：{ee}", flush=True)
+            if STRICT: raise
+
+    # 持有引用，避免被 GC 释放导致 hook 失效
+    model._vp_runtime = vp
+
+    if LOG_ON:
+        print(f"[*] 视觉软提示已挂载（按训练实现）：n_sp={n_sp} dim={vp.core.dim} 通过 projector 的 forward_hook", flush=True)
 
     return True
+
+
+
 
 def _compute_confusion_and_metrics(preds, gts, labels):
     """Return cm(np.int64[K,K]), metrics(dict), and per-class acc(dict)."""
@@ -289,32 +289,19 @@ def _print_and_save_confusion(cm, labels, out_dir, prefix):
         print(f"{l:>10} | {row}")
 
 @torch.inference_mode()
-def run_one(
-    model,
-    processor,
-    messages,
-    max_new_tokens: int,
-    label_space: List[str],
-) -> str:
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    images, videos = process_vision_info(messages)
-    inputs = processor(text=[text], images=images, videos=videos, padding=True, return_tensors="pt").to(model.device)
-    with torch.inference_mode():
-        out = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            num_beams=1,
-            return_dict_in_generate=True,
-            output_scores=True,  # 拿每步 logits
+def run_one(model, processor, messages, max_new_tokens: int, label_space: List[str]) -> str:
+    device = model.device
+    # 统一准备 inputs
+    raw_inputs = prepare_inputs_from_messages(processor, messages, device)
+    hf_inputs = filter_to_gen_allow(raw_inputs)
+
+    # 推理默认已无 dropout；这里用 guard 也安全（如果哪天又引入了）
+    row_replacer = getattr(getattr(model, "_prompt_learner", None), "_row_replacer", None)  # 若无可为 None
+    vp_core = getattr(getattr(model, "_vp_runtime", None), "core", None)                    # 你推理侧挂在 model._vp_runtime
+    with prompt_eval_guards(row_replacer, vp_core):
+        text_out, _ = generate_scores_argmax(
+            model, processor, hf_inputs, max_new_tokens=max_new_tokens, decode_clean=False
         )
-    gen_ids = []
-    for s in out.scores:  # s: [B, vocab]
-        probs = torch.softmax(s.float(), dim=-1)
-        token = probs.argmax(dim=-1) 
-        gen_ids.append(token)
-    gen_ids = torch.stack(gen_ids, dim=1)[0]  # [new_len]
-    text_out = processor.decode(gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
     return text_out
 
 def iter_with_clean_progress(

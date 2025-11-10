@@ -4,11 +4,11 @@ set -euo pipefail
 ############################################
 # 可改区：核心配置（按需调整）
 ############################################
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}"
 # 文本软提示数量（默认8个，可按需调整）
 export SP_N_TOKENS="${SP_N_TOKENS:-8}"
 # 视觉软提示数量（默认8个，建议4-16个）
-export VISUAL_SP_N_TOKENS="${VISUAL_SP_N_TOKENS:-8}"
+export VISUAL_SP_N_TOKENS="${VISUAL_SP_N_TOKENS:-32}"
 export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-0}"  # 1=仅文本，0=不单独启用
 export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-1}"  # 1=仅视觉，0=不单独启用
 # 其他环境变量
@@ -16,7 +16,6 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NPROC="${NPROC:-1}"
 export SAVE_EVERY_STEP="${SAVE_EVERY_STEP:-100}"
-
 ############################################
 MODEL="/home/lym/models/qwen2.5_vl"
 # 数据集配置（支持 t2015/t2017/tumemo）
@@ -38,14 +37,14 @@ ARGS=(
   --img_dir       "$IMG_DIR"
   --tsv           "test.tsv"
   --train_tsv     "train_few1.tsv"
-  --dev_tsv       "dev_few1.tsv"
+  --dev_tsv       "test.tsv"
   --dtype         bf16
   --min_pixels    50176
   --max_pixels    1048576
   --batch_size    4
   --sp_mode       generic
-  --sp_lr         8e-4  # 文本Prompt学习率（视觉Prompt自动为 8e-4 * 1.5 = 1.2e-3）
-  --sp_steps      1000  # 最大训练步数
+  --sp_lr         1e-4  # 文本Prompt学习率（视觉Prompt自动为 8e-4 * 1.5 = 1.2e-3）
+  --sp_steps      1500  # 最大训练步数
   --sp_accum      1     # 梯度累积步数（显存不足时调大，如2/4）
   --sp_warmup     200   # 学习率热身步数（默认200，建议为总步数的10%-20%）
   --sp_ckpt       "$CKPT_DIR"  # 主checkpoint保存目录（最佳模型+最终模型）

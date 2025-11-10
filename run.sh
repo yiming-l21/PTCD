@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # -------------------- GPU 选择 --------------------
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"6,7,5"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"6,7,4,2"}
 : "${CUDA_VISIBLE_DEVICES:=}"
 
 detect_gpus() {

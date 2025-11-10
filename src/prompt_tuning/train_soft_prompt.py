@@ -15,9 +15,6 @@ from utils import set_seed, build_msgs, parse_label_from_output
 from prompt_tuning.prompt_learner import SoftPromptLearner, TrainCfg
 from sp_utils import init_soft_tokens, init_visual_soft_tokens, gpu_mem_snapshot, gpu_mem_reset_peak
 
-def label_to_target_json(label: str) -> str:
-    return f'{{"label": "{label}"}}'
-
 def collate(samples, processor, labels, label_map, use_image, img_root, has_aspect, tpl, device="cpu"):
     batch_msgs = []
     gold = []
@@ -193,7 +190,7 @@ def main():
     )
 
     # 开始训练
-    learner.fit(train_loader, dev_loader, target_builder=label_to_target_json)
+    learner.fit(train_loader, dev_loader)
 
 if __name__ == "__main__":
     main()
