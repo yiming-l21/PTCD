@@ -13,9 +13,32 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 import argparse
+import re  # 新增：用于文本清理的正则库
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+# 新增：兜底文本清理函数（强制移除所有Markdown和换行符）
+def clean_text(text):
+    """
+    强制清理文本中的所有Markdown格式和换行符，确保输出纯文本
+    处理范围：粗体/斜体、代码块、标题、列表、引用、链接、删除线、换行符、多余空格
+    """
+    # 1. 移除Markdown格式
+    text = re.sub(r'\*\*|\__|\*|_', '', text)  # 粗体（**/**、__/__）、斜体（*/、_/_）
+    text = re.sub(r'`{1,3}', '', text)  # 代码块（`单行`、```多行```）
+    text = re.sub(r'^#{1,6}\s', '', text, flags=re.MULTILINE)  # 标题（# 到 ######）
+    text = re.sub(r'^[-*+]\s', '', text, flags=re.MULTILINE)  # 无序列表（-/*/+ 开头）
+    text = re.sub(r'^\d+\.\s', '', text, flags=re.MULTILINE)  # 有序列表（1./2. 开头）
+    text = re.sub(r'^>\s', '', text, flags=re.MULTILINE)  # 引用（> 开头）
+    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)  # 链接（[文本](url) → 保留文本）
+    text = re.sub(r'~~', '', text)  # 删除线（~~文本~~）
+    text = re.sub(r'\[|\]|\(|\)', '', text)  # 移除残留的链接符号
+    # 2. 移除所有换行符和回车符
+    text = text.replace("\n", "").replace("\r", "").replace("\r\n", "")
+    # 3. 合并多余空格（避免清理后出现多个连续空格）
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def build_transform(input_size):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
@@ -87,53 +110,54 @@ def load_image(image_file, input_size=448, max_num=12):
 class SentimentDescriptionAugmenter:
     """Generate varied descriptions for sentiment analysis images with batch inference"""
     
+    # 修改：所有prompt末尾追加「无Markdown+无换行」强制指令
     PROMPT_TEMPLATES = {
         "detailed_objective": {
-            "negative": "<image>\nThis image has a negative sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere.",
-            "neutral": "<image>\nThis image has a neutral sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere.",
-            "positive": "<image>\nThis image has a positive sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere."
+            "negative": "<image>\nThis image has a negative sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis image has a neutral sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis image has a positive sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "concise_factual": {
-            "negative": "<image>\nFor sentiment analysis, this is negative. In 2-3 sentences, describe the key elements and scene in this image.",
-            "neutral": "<image>\nFor sentiment analysis, this is neutral. In 2-3 sentences, describe the key elements and scene in this image.",
-            "positive": "<image>\nFor sentiment analysis, this is positive. In 2-3 sentences, describe the key elements and scene in this image."
+            "negative": "<image>\nFor sentiment analysis, this is negative. In 2-3 sentences, describe the key elements and scene in this image. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nFor sentiment analysis, this is neutral. In 2-3 sentences, describe the key elements and scene in this image. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nFor sentiment analysis, this is positive. In 2-3 sentences, describe the key elements and scene in this image. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "emotion_focused": {
-            "negative": "<image>\nThis image conveys negative sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment.",
-            "neutral": "<image>\nThis image conveys neutral sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment.",
-            "positive": "<image>\nThis image conveys positive sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment."
+            "negative": "<image>\nThis image conveys negative sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis image conveys neutral sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis image conveys positive sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "compositional": {
-            "negative": "<image>\nGiven the negative sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context.",
-            "neutral": "<image>\nGiven the neutral sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context.",
-            "positive": "<image>\nGiven the positive sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context."
+            "negative": "<image>\nGiven the negative sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nGiven the neutral sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nGiven the positive sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "action_context": {
-            "negative": "<image>\nThis is a negative sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene.",
-            "neutral": "<image>\nThis is a neutral sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene.",
-            "positive": "<image>\nThis is a positive sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene."
+            "negative": "<image>\nThis is a negative sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis is a neutral sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis is a positive sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "visual_elements": {
-            "negative": "<image>\nFor a sentiment analysis task (negative), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details.",
-            "neutral": "<image>\nFor a sentiment analysis task (neutral), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details.",
-            "positive": "<image>\nFor a sentiment analysis task (positive), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details."
+            "negative": "<image>\nFor a sentiment analysis task (negative), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nFor a sentiment analysis task (neutral), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nFor a sentiment analysis task (positive), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "scene_narrative": {
-            "negative": "<image>\nLabel: Negative sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details.",
-            "neutral": "<image>\nLabel: Neutral sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details.",
-            "positive": "<image>\nLabel: Positive sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details."
+            "negative": "<image>\nLabel: Negative sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nLabel: Neutral sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nLabel: Positive sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "alternative_perspective": {
-            "negative": "<image>\nThis image is classified as negative. Provide an alternative description focusing on different aspects than a typical description might emphasize.",
-            "neutral": "<image>\nThis image is classified as neutral. Provide an alternative description focusing on different aspects than a typical description might emphasize.",
-            "positive": "<image>\nThis image is classified as positive. Provide an alternative description focusing on different aspects than a typical description might emphasize."
+            "negative": "<image>\nThis image is classified as negative. Provide an alternative description focusing on different aspects than a typical description might emphasize. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis image is classified as neutral. Provide an alternative description focusing on different aspects than a typical description might emphasize. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis image is classified as positive. Provide an alternative description focusing on different aspects than a typical description might emphasize. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         }
     }
     
@@ -145,7 +169,7 @@ class SentimentDescriptionAugmenter:
     
     def generate_descriptions_batch(self, pixel_values_list, num_patches_list, sentiments):
         """
-        Generate descriptions for a batch of images using batch inference
+        Generate descriptions for a batch of images using batch inference (with post-processing cleanup)
         
         Args:
             pixel_values_list: List of pixel_values tensors for each image
@@ -153,7 +177,7 @@ class SentimentDescriptionAugmenter:
             sentiments: List of sentiment strings for each image
         
         Returns:
-            List of dictionaries, where each dict contains all description types for one image
+            List of dictionaries, where each dict contains all cleaned description types for one image
         """
         batch_size = len(sentiments)
         results = [{} for _ in range(batch_size)]
@@ -176,9 +200,12 @@ class SentimentDescriptionAugmenter:
                     generation_config=self.generation_config
                 )
                 
-                # Store results
-                for i, response in enumerate(responses):
-                    results[i][strategy] = response
+                # 新增：对批量响应逐个进行兜底清理
+                cleaned_responses = [clean_text(response) for response in responses]
+                
+                # Store cleaned results
+                for i, cleaned_response in enumerate(cleaned_responses):
+                    results[i][strategy] = cleaned_response
                     
             except Exception as e:
                 print(f"Error with batch {strategy}: {e}")
@@ -229,7 +256,7 @@ def label_to_sentiment(label_str):
 
 
 def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augmenter, batch_size=8):
-    """Process a single dataset split (train or dev) with batch inference"""
+    """Process a single dataset split (train or dev) with batch inference + 批次级保存"""
     
     dataset_path = Path(dataset_root) / dataset_name
     tsv_file = dataset_path / f"{split}.tsv"
@@ -249,11 +276,20 @@ def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augment
     
     header = lines[0]
     data_lines = lines[1:]
-    
-    # Storage for different description types
     description_types = list(SentimentDescriptionAugmenter.PROMPT_TEMPLATES.keys())
-    type_outputs = {desc_type: [] for desc_type in description_types}
-    augment_output = []  # For combined augment file
+    
+    # 初始化：记录每个文件是否已写入表头（避免重复写入）
+    header_written = {
+        desc_type: False for desc_type in description_types
+    }
+    header_written['augment'] = False
+    
+    # 定义输出文件路径
+    output_files = {
+        desc_type: augments_dir / f"{split}_{desc_type}.tsv" 
+        for desc_type in description_types
+    }
+    output_files['augment'] = augments_dir / f"{split}_augment.tsv"
     
     # Process in batches
     num_batches = (len(data_lines) + batch_size - 1) // batch_size
@@ -262,6 +298,10 @@ def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augment
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(data_lines))
         batch_lines = data_lines[start_idx:end_idx]
+        
+        # 本批次结果缓存（仅用于临时存储，处理完立即写入）
+        batch_type_data = {desc_type: [] for desc_type in description_types}
+        batch_augment_data = []
         
         # Prepare batch data
         batch_parsed = []
@@ -303,7 +343,7 @@ def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augment
                 batch_valid_indices.append(None)
                 continue
         
-        # Generate descriptions for valid images in batch
+        # Generate descriptions for valid images in batch (已自动清理)
         if batch_pixel_values:
             batch_descriptions = augmenter.generate_descriptions_batch(
                 batch_pixel_values,
@@ -313,101 +353,104 @@ def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augment
         else:
             batch_descriptions = []
         
-        # Process results and write output
+        # 收集本批次结果
         for item_idx, (parsed, valid_idx) in enumerate(zip(batch_parsed, batch_valid_indices)):
             if parsed is None:
                 continue
             
             if valid_idx is None:
-                # Use original text for missing images
+                # 对原始文本进行清理，保证格式统一
+                cleaned_original_text = clean_text(parsed['text'])
+                # 写入各类型文件
                 for desc_type in description_types:
                     if parsed['entity']:
-                        type_outputs[desc_type].append(
-                            f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{parsed['text']}\t{parsed['entity']}\n"
-                        )
+                        line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{cleaned_original_text}\t{parsed['entity']}\n"
                     else:
-                        type_outputs[desc_type].append(
-                            f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{parsed['text']}\n"
-                        )
+                        line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{cleaned_original_text}\n"
+                    batch_type_data[desc_type].append(line)
                 
+                # 写入合并文件
                 if parsed['entity']:
-                    augment_output.append(
-                        f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{parsed['text']}\t{parsed['entity']}\n"
-                    )
+                    line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{cleaned_original_text}\t{parsed['entity']}\n"
                 else:
-                    augment_output.append(
-                        f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{parsed['text']}\n"
-                    )
+                    line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{cleaned_original_text}\n"
+                batch_augment_data.append(line)
             else:
-                # Use generated descriptions
+                # Use generated descriptions (已清理)
                 descriptions = batch_descriptions[valid_idx]
                 
-                # Save to separate type files
+                # 收集各类型描述（单独文件的记录，保持不变）
                 for desc_type, description in descriptions.items():
                     if parsed['entity']:
-                        type_outputs[desc_type].append(
-                            f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{description}\t{parsed['entity']}\n"
-                        )
+                        line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{description}\t{parsed['entity']}\n"
                     else:
-                        type_outputs[desc_type].append(
-                            f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{description}\n"
-                        )
+                        line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{description}\n"
+                    batch_type_data[desc_type].append(line)
                 
-                # Concatenate all descriptions for augment file (one per line)
-                combined_description = '\n'.join([descriptions[dt] for dt in description_types])
-                
-                if parsed['entity']:
-                    augment_output.append(
-                        f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{combined_description}\t{parsed['entity']}\n"
-                    )
-                else:
-                    augment_output.append(
-                        f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{combined_description}\n"
-                    )
+                # 【修改后】为每个描述类型生成独立的完整记录（用于augment文件）
+                for dt in description_types:
+                    description = descriptions[dt]
+                    if parsed['entity']:
+                        line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{description}\t{parsed['entity']}\n"
+                    else:
+                        line = f"{parsed['index']}\t{parsed['label']}\t{parsed['image_id']}\t{description}\n"
+                    batch_augment_data.append(line)
+        
+        # 【核心修改】本批次结果写入文件（追加模式）
+        # 1. 写入各类型描述文件
+        for desc_type in description_types:
+            with open(output_files[desc_type], 'a', encoding='utf-8') as f:
+                # 第一个批次写入表头
+                if not header_written[desc_type]:
+                    f.write(header)
+                    header_written[desc_type] = True
+                # 写入本批次数据
+                f.writelines(batch_type_data[desc_type])
+        
+        # 2. 写入合并描述文件
+        with open(output_files['augment'], 'a', encoding='utf-8') as f:
+            if not header_written['augment']:
+                f.write(header)
+                header_written['augment'] = True
+            f.writelines(batch_augment_data)
+        
+        # 打印批次保存提示
+        print(f"✓ Batch {batch_idx+1}/{num_batches} saved to files")
     
-    # Write separate files for each description type
+    # 处理完成提示
+    print(f"\n✓ All batches processed for {dataset_name}/{split}")
     for desc_type in description_types:
-        output_file = augments_dir / f"{split}_{desc_type}.tsv"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(header)
-            f.writelines(type_outputs[desc_type])
-        print(f"✓ Saved: {output_file}")
-    
-    # Write combined augment file
-    augment_file = augments_dir / f"{split}_augment.tsv"
-    with open(augment_file, 'w', encoding='utf-8') as f:
-        f.write(header)
-        f.writelines(augment_output)
-    print(f"✓ Saved: {augment_file}")
-    
+        print(f"  - {output_files[desc_type].name}")
+    print(f"  - {output_files['augment'].name}")
     print(f"{'='*80}\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate augmented descriptions for multiple datasets')
+    parser = argparse.ArgumentParser(description='Generate augmented descriptions for multiple datasets (batch inference + 批次级保存 + text cleanup)')
     parser.add_argument('--dataset_root', type=str, required=True, help='Root directory containing all datasets')
     parser.add_argument('--datasets', type=str, nargs='+', required=True, 
                         help='List of dataset names to process (e.g., masad mvsa-m mvsa-s)')
-    parser.add_argument('--splits', type=str, nargs='+', default=['train', 'dev'],
-                        help='Splits to process (default: train dev)')
-    parser.add_argument('--model_path', type=str, default='OpenGVLab/InternVL3_5-14B',
+    parser.add_argument('--splits', type=str, nargs='+', default=['train_few1', 'dev_few1'],
+                        help='Splits to process (default: train_few1 dev_few1)')
+    parser.add_argument('--model_path', type=str, default='OpenGVLab/InternVL3_5-8B',
                         help='Path to the VLM model')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=1,
                         help='Batch size for inference (default: 8)')
     
     args = parser.parse_args()
     
     print("="*80)
-    print("MULTI-DATASET AUGMENTATION GENERATOR (BATCH INFERENCE)")
+    print("MULTI-DATASET AUGMENTATION GENERATOR (BATCH INFERENCE + 批次级保存 + TEXT CLEANUP)")
     print("="*80)
     print(f"Dataset root: {args.dataset_root}")
     print(f"Datasets: {', '.join(args.datasets)}")
     print(f"Splits: {', '.join(args.splits)}")
     print(f"Model: {args.model_path}")
     print(f"Batch size: {args.batch_size}")
+    print("Feature 1: Auto-clean Markdown, line breaks, and extra spaces")
+    print("Feature 2: Save results after each batch (no need to wait for all samples)")
     print("="*80)
     
-    # Load model
     # Load model
     print("\nLoading model...")
     with init_empty_weights():
@@ -459,6 +502,8 @@ def main():
     print("Each dataset now has:")
     print("  - {split}_augment.tsv (all descriptions concatenated)")
     print("  - {split}_{description_type}.tsv (8 separate files per description type)")
+    print("Note 1: All text has been cleaned of Markdown, line breaks, and extra spaces")
+    print("Note 2: Results were saved incrementally after each batch")
     print("="*80)
 
 

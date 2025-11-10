@@ -13,9 +13,32 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 import argparse
+import re  # 新增：用于文本清理的正则库
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+# 新增：兜底文本清理函数（强制移除所有Markdown和换行符）
+def clean_text(text):
+    """
+    强制清理文本中的所有Markdown格式和换行符，确保输出纯文本
+    处理范围：粗体/斜体、代码块、标题、列表、引用、链接、删除线、换行符、多余空格
+    """
+    # 1. 移除Markdown格式
+    text = re.sub(r'\*\*|\__|\*|_', '', text)  # 粗体（**/**、__/__）、斜体（*/、_/_）
+    text = re.sub(r'`{1,3}', '', text)  # 代码块（`单行`、```多行```）
+    text = re.sub(r'^#{1,6}\s', '', text, flags=re.MULTILINE)  # 标题（# 到 ######）
+    text = re.sub(r'^[-*+]\s', '', text, flags=re.MULTILINE)  # 无序列表（-/*/+ 开头）
+    text = re.sub(r'^\d+\.\s', '', text, flags=re.MULTILINE)  # 有序列表（1./2. 开头）
+    text = re.sub(r'^>\s', '', text, flags=re.MULTILINE)  # 引用（> 开头）
+    text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)  # 链接（[文本](url) → 保留文本）
+    text = re.sub(r'~~', '', text)  # 删除线（~~文本~~）
+    text = re.sub(r'\[|\]|\(|\)', '', text)  # 移除残留的链接符号
+    # 2. 移除所有换行符和回车符
+    text = text.replace("\n", "").replace("\r", "").replace("\r\n", "")
+    # 3. 合并多余空格（避免清理后出现多个连续空格）
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def build_transform(input_size):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
@@ -89,51 +112,51 @@ class SentimentDescriptionAugmenter:
     
     PROMPT_TEMPLATES = {
         "detailed_objective": {
-            "negative": "<image>\nThis image has a negative sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere.",
-            "neutral": "<image>\nThis image has a neutral sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere.",
-            "positive": "<image>\nThis image has a positive sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere."
+            "negative": "<image>\nThis image has a negative sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis image has a neutral sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis image has a positive sentiment. Provide a detailed, objective description of what is visible in the image, including objects, people, actions, colors, setting, and atmosphere. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "concise_factual": {
-            "negative": "<image>\nFor sentiment analysis, this is negative. In 2-3 sentences, describe the key elements and scene in this image.",
-            "neutral": "<image>\nFor sentiment analysis, this is neutral. In 2-3 sentences, describe the key elements and scene in this image.",
-            "positive": "<image>\nFor sentiment analysis, this is positive. In 2-3 sentences, describe the key elements and scene in this image."
+            "negative": "<image>\nFor sentiment analysis, this is negative. In 2-3 sentences, describe the key elements and scene in this image. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nFor sentiment analysis, this is neutral. In 2-3 sentences, describe the key elements and scene in this image. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nFor sentiment analysis, this is positive. In 2-3 sentences, describe the key elements and scene in this image. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "emotion_focused": {
-            "negative": "<image>\nThis image conveys negative sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment.",
-            "neutral": "<image>\nThis image conveys neutral sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment.",
-            "positive": "<image>\nThis image conveys positive sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment."
+            "negative": "<image>\nThis image conveys negative sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis image conveys neutral sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis image conveys positive sentiment. Describe the image focusing on the emotional cues, atmosphere, and mood that contribute to this sentiment. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "compositional": {
-            "negative": "<image>\nGiven the negative sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context.",
-            "neutral": "<image>\nGiven the neutral sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context.",
-            "positive": "<image>\nGiven the positive sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context."
+            "negative": "<image>\nGiven the negative sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nGiven the neutral sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nGiven the positive sentiment, describe this image by analyzing: 1) Main subjects and their arrangement, 2) Visual elements like lighting and colors, 3) Overall scene context. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "action_context": {
-            "negative": "<image>\nThis is a negative sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene.",
-            "neutral": "<image>\nThis is a neutral sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene.",
-            "positive": "<image>\nThis is a positive sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene."
+            "negative": "<image>\nThis is a negative sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis is a neutral sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis is a positive sentiment image. Describe what is happening in the image, including any actions, interactions, or events visible in the scene. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "visual_elements": {
-            "negative": "<image>\nFor a sentiment analysis task (negative), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details.",
-            "neutral": "<image>\nFor a sentiment analysis task (neutral), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details.",
-            "positive": "<image>\nFor a sentiment analysis task (positive), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details."
+            "negative": "<image>\nFor a sentiment analysis task (negative), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nFor a sentiment analysis task (neutral), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nFor a sentiment analysis task (positive), describe the visual characteristics: colors, lighting, composition, spatial relationships, and notable details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "scene_narrative": {
-            "negative": "<image>\nLabel: Negative sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details.",
-            "neutral": "<image>\nLabel: Neutral sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details.",
-            "positive": "<image>\nLabel: Positive sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details."
+            "negative": "<image>\nLabel: Negative sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nLabel: Neutral sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nLabel: Positive sentiment. Describe this image as if explaining the scene to someone who cannot see it, including context and relevant details. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         },
         
         "alternative_perspective": {
-            "negative": "<image>\nThis image is classified as negative. Provide an alternative description focusing on different aspects than a typical description might emphasize.",
-            "neutral": "<image>\nThis image is classified as neutral. Provide an alternative description focusing on different aspects than a typical description might emphasize.",
-            "positive": "<image>\nThis image is classified as positive. Provide an alternative description focusing on different aspects than a typical description might emphasize."
+            "negative": "<image>\nThis image is classified as negative. Provide an alternative description focusing on different aspects than a typical description might emphasize. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "neutral": "<image>\nThis image is classified as neutral. Provide an alternative description focusing on different aspects than a typical description might emphasize. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r').",
+            "positive": "<image>\nThis image is classified as positive. Provide an alternative description focusing on different aspects than a typical description might emphasize. Do not use any Markdown formatting (including bold, italics, code blocks, lists, headers, links) and do not use line breaks or newlines ('\n', '\r')."
         }
     }
     
@@ -143,7 +166,7 @@ class SentimentDescriptionAugmenter:
         self.generation_config = dict(max_new_tokens=1024, do_sample=True)
     
     def generate_descriptions(self, pixel_values, sentiment):
-        """Generate all description types for a sentiment analysis image"""
+        """Generate all description types for a sentiment analysis image (with post-processing cleanup)"""
         sentiment = sentiment.lower()
         results = {}
         
@@ -157,7 +180,9 @@ class SentimentDescriptionAugmenter:
                     question, 
                     self.generation_config
                 )
-                results[strategy] = response
+                # 新增：调用兜底清理函数，强制移除残留Markdown和换行符
+                cleaned_response = clean_text(response)
+                results[strategy] = cleaned_response  # 存储清理后的文本
             except Exception as e:
                 print(f"Error with {strategy}: {e}")
                 results[strategy] = f"Error: {str(e)}"
@@ -262,7 +287,7 @@ def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augment
             # Get sentiment
             sentiment = label_to_sentiment(parsed['label'])
             
-            # Generate all descriptions
+            # Generate all descriptions (已自动清理)
             descriptions = augmenter.generate_descriptions(pixel_values, sentiment)
             
             # Save to separate type files
@@ -304,24 +329,25 @@ def process_dataset(dataset_name, dataset_root, split, model, tokenizer, augment
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate augmented descriptions for multiple datasets')
+    parser = argparse.ArgumentParser(description='Generate augmented descriptions for multiple datasets (with text cleanup)')
     parser.add_argument('--dataset_root', type=str, required=True, help='Root directory containing all datasets')
     parser.add_argument('--datasets', type=str, nargs='+', required=True, 
                         help='List of dataset names to process (e.g., masad mvsa-m mvsa-s)')
-    parser.add_argument('--splits', type=str, nargs='+', default=['train', 'dev'],
-                        help='Splits to process (default: train dev)')
+    parser.add_argument('--splits', type=str, nargs='+', default=['train_few1', 'dev_few1'],
+                        help='Splits to process (default: train_few1 dev_few1)')
     parser.add_argument('--model_path', type=str, default='OpenGVLab/InternVL3_5-14B',
                         help='Path to the VLM model')
     
     args = parser.parse_args()
     
     print("="*80)
-    print("MULTI-DATASET AUGMENTATION GENERATOR")
+    print("MULTI-DATASET AUGMENTATION GENERATOR (WITH TEXT CLEANUP)")
     print("="*80)
     print(f"Dataset root: {args.dataset_root}")
     print(f"Datasets: {', '.join(args.datasets)}")
     print(f"Splits: {', '.join(args.splits)}")
     print(f"Model: {args.model_path}")
+    print("Feature: Auto-clean Markdown, line breaks, and extra spaces")
     print("="*80)
     
     # Load model
@@ -375,6 +401,7 @@ def main():
     print("Each dataset now has:")
     print("  - {split}_augment.tsv (all descriptions concatenated)")
     print("  - {split}_{description_type}.tsv (8 separate files per description type)")
+    print("Note: All text has been cleaned of Markdown, line breaks, and extra spaces")
     print("="*80)
 
 
