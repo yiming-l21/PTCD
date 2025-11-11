@@ -482,9 +482,9 @@ class TrainCfg:
     warmup_ratio: float = 0.10
     max_grad_norm: float = 1.0
     init_prompt: Optional[str] = (
-        "You are a helpful assistant that answers by returning JSON like {\"label\": \"<class>\"}."
+        "You are a helpful assistant that answers by returning ONE word like \"<class>\"."
     )
-    visual_sp_dropout: float = 0.1  # 视觉前缀 dropout（训练时）
+    visual_sp_dropout: float = 0.2  # 视觉前缀 dropout（训练时）
 
 
 class SoftPromptLearner:
@@ -599,11 +599,11 @@ class SoftPromptLearner:
             self.vp_cfg = VisualPromptCfg(
                 n_tokens=self.n_visual_sp,
                 cond_pool=False,
-                lr=self.cfg.lr * 0.5,
+                lr=self.cfg.lr * 0.3,
                 weight_decay=self.cfg.weight_decay,
                 dropout_p=float(getattr(self.cfg, "visual_sp_dropout", 0.0)),
-                reg_anchor=1e-3,
-                reg_ortho=1e-3,
+                reg_anchor=3e-3,
+                reg_ortho=3e-3,
             )
             self.vp = VisualPrompt(self.model, self.vp_cfg)
             print(f"[visual-sp] 维度: +{self.vp_cfg.n_tokens} prefix tokens | 通过 projector/merger 前向 hook 进行拼接注入")
@@ -717,25 +717,6 @@ class SoftPromptLearner:
         self.soft_param.normal_(mean=mean, std=std)
         print(f"[init] soft prompts initialized from Gaussian N({mean:.3f}, {std:.3f}^2)")
 
-    @torch.no_grad()
-    def _init_soft_from_text(self, prompt: str):
-        ids = self.tok(prompt, add_special_tokens=False)["input_ids"]
-        if len(ids) == 0:
-            print("[init] 模板token化为空，跳过文本软提示初始化")
-            return
-        emb_layer = self.model.get_input_embeddings()
-        base_table = emb_layer.parametrizations.weight.original if hasattr(emb_layer, "parametrizations") else emb_layer.weight
-        idx = torch.tensor(ids, device=base_table.device, dtype=torch.long)
-        vecs = base_table[idx]
-        if len(self.soft_ids) <= vecs.size(0):
-            chosen = vecs[:len(self.soft_ids)]
-        else:
-            reps = (len(self.soft_ids) + vecs.size(0) - 1) // vecs.size(0)
-            chosen = vecs.repeat(reps, 1)[:len(self.soft_ids)]
-        noise = torch.randn_like(chosen) * 0.01
-        self.soft_param.data.copy_(chosen + noise)
-        print(f"[init] 文本软提示从模板初始化完成（模板token数：{len(ids)}）")
-
     def _save_step_ckpt(self, step: int, current_loss: float, current_lr: float):
         if not self.cfg.step_ckpt_dir:
             return
@@ -798,7 +779,7 @@ class SoftPromptLearner:
                     text_out, _ = generate_scores_argmax(
                         self.model, self.tok, hf_inputs,
                         max_new_tokens=max_new_tokens,
-                        decode_clean=False,              # 与推理侧一致
+                        decode_clean=False,             
                     )
                     latencies.append((time.time() - t0) * 1000.0)
 
