@@ -81,35 +81,35 @@ def _first_json(text: str) -> dict | None:
     except Exception:
         return None
 
-# def parse_label_from_output(raw: str, label_space: List[str]) -> str:
-#     data = _first_json(raw)
-#     if isinstance(data, dict):
-#         val = data.get("label")
-#         if isinstance(val, str):
-#             low = val.strip().lower()
-#             for cand in label_space:
-#                 if low == cand.lower():
-#                     return cand
-#     low_out = raw.lower()
-#     for cand in label_space:
-#         pat = rf"\b{re.escape(cand.lower())}\b"
-#         if re.search(pat, low_out):
-#             return cand
-#     return label_space[0]
-def parse_label_from_output(raw: str, label_space: List[str]) -> str:
-    """从模型生成的字符串中解析情感标签（不再解析 JSON）"""
-    if not isinstance(raw, str):
-        return label_space[0]
-    low_out = raw.strip().lower()
+def parse_label_from_output(raw: str, label_space: List[str], target_mode: str = "token") -> str:
+    if target_mode == "token":
+        if not isinstance(raw, str):
+            return label_space[0]
+        low_out = raw.strip().lower()
 
-    # 精确匹配：优先检测单词边界，防止 false match（如 'positive' in 'depositive'）
+        # 精确匹配：优先检测单词边界，防止 false match（如 'positive' in 'depositive'）
+        for cand in label_space:
+            pat = rf"\b{re.escape(cand.lower())}\b"
+            if re.search(pat, low_out):
+                return cand
+
+        # fallback: 如果都没匹配上，就用第一个类（通常是 neutral 或 negative）
+        return label_space[0]
+    data = _first_json(raw)
+    if isinstance(data, dict):
+        val = data.get("label")
+        if isinstance(val, str):
+            low = val.strip().lower()
+            for cand in label_space:
+                if low == cand.lower():
+                    return cand
+    low_out = raw.lower()
     for cand in label_space:
         pat = rf"\b{re.escape(cand.lower())}\b"
         if re.search(pat, low_out):
             return cand
-
-    # fallback: 如果都没匹配上，就用第一个类（通常是 neutral 或 negative）
     return label_space[0]
+
 def build_msgs(
     *,
     instruction: str,

@@ -154,7 +154,7 @@ def _maybe_init_prompt(model, processor, label_space):
     if trained_cond is None:
         # 更稳健：看有没有“adapter/cond/shift”相关参数
         has_adapter = any(("adapter" in k) or ("cond" in k) or ("shift" in k) for k in vp_state.keys())
-        trained_cond = True if has_adapter else True  # 默认 True
+        trained_cond = True if has_adapter else False  # 默认 True
     else:
         trained_cond = bool(trained_cond)
 

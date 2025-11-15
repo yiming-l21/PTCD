@@ -14,23 +14,42 @@ from retrieve_demo import DemoProvider
 from utils import set_seed, build_msgs, parse_label_from_output
 from prompt_tuning.prompt_learner import SoftPromptLearner, TrainCfg
 from sp_utils import init_soft_tokens, init_visual_soft_tokens, gpu_mem_snapshot, gpu_mem_reset_peak
-
-def collate(samples, processor, labels, label_map, use_image, img_root, has_aspect, tpl, device="cpu"):
+def collate(
+    samples,
+    processor,
+    labels,
+    label_map,
+    use_image,
+    img_root,
+    has_aspect,
+    tpl,
+    device="cpu",
+    demo=None,               
+    dataset_name: str = "",    
+):
     batch_msgs = []
     gold = []
     for s in samples:
         img_path = (str((img_root / s.img_id)) if (use_image and s.img_id) else None)
         user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect)
         instruction = build_instruction(labels, use_image, has_aspect, tpl)
+        sample_idx = getattr(s, "_idx", None)
+        prefix_demo_msgs = []
+        if demo is not None and sample_idx is not None:
+            try:
+                prefix_demo_msgs, _diag = demo.for_query(sample_idx, label_map=label_map, dataset_name=dataset_name)
+            except Exception as e:
+                prefix_demo_msgs = []
         msgs = build_msgs(
             instruction=instruction,
             user_text=user_text,
             use_image=use_image and (img_path is not None),
             img_path=img_path,
-            prefix_demo_msgs=[],
+            prefix_demo_msgs=prefix_demo_msgs,   
         )
         batch_msgs.append(msgs)
         gold.append(label_map[s.label])
+
     text_list = [processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in batch_msgs]
     images, videos = [], []
     from qwen_vl_utils import process_vision_info
@@ -42,6 +61,7 @@ def collate(samples, processor, labels, label_map, use_image, img_root, has_aspe
         "hf_inputs": enc,
         "gold_label_str": gold
     }
+
 
 def find_transformer_layers(model):
     candidate_paths = [
@@ -106,10 +126,16 @@ def main():
 
     dataset_name = Path(args.data_dir).name
     labels, label_map, tmpl = get_labels_and_template(dataset_name, getattr(args, "template_id", 2))
+
     train_reader = MSADataset(args, args.data_dir / args.train_tsv, dataset_name=dataset_name, label_map=label_map)
     train_samples = train_reader.read()
     dev_reader = MSADataset(args, args.data_dir / args.dev_tsv, dataset_name=dataset_name, label_map=label_map)
     dev_samples = dev_reader.read()
+
+
+    for i, s in enumerate(train_samples): setattr(s, "_idx", i)
+    base = len(train_samples)
+    for j, s in enumerate(dev_samples):   setattr(s, "_idx", base + j)
 
     # 加载模型
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -117,18 +143,14 @@ def main():
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map=device
     )
-    ratio4dataset={"t2017": 0.8, "t2015":0.3, "tumemo":0.7 }
-    if dataset_name in ["t2017", "tumemo", "t2015"]:
-        enable_gc_for_last_ratio(model, ratio=ratio4dataset[dataset_name])
+    ratio4dataset={"t2017": 0.8, "t2015":0.3, "tumemo":0.7, "masad":0.9 }
+    # if dataset_name in ["t2017", "tumemo", "t2015"]:
+    enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.5))
     print("model dtype", model.dtype)
     gpu_mem_snapshot(prefix="[after load ] ")
 
-    # 加载processor
     processor = AutoProcessor.from_pretrained(
-        args.model, 
-        min_pixels=args.min_pixels, 
-        max_pixels=args.max_pixels, 
-        use_fast=False
+        args.model, min_pixels=args.min_pixels, max_pixels=args.max_pixels, use_fast=False
     )
 
     # 初始化文本软提示
@@ -146,9 +168,14 @@ def main():
         True if "fine" in str(tmpl).lower() else ("t2015" in dataset_name or "t2017" in dataset_name or "masad" in dataset_name)
     )
 
-    # 构建DataLoader
+    # --- 3：构建 DemoProvider（与推理侧一样从 env 读 USE_DEMO/DEMO_TOPK/DEMO_MODE/TRAIN_JSONL 等）---
+    print(f"check path for demo: {Path(args.data_dir) / 'imgs'}")
+    demo = DemoProvider.from_env(args, dataset_name=dataset_name, image_base=Path(args.data_dir) / "imgs")
+
+    # 构建DataLoader（collate 里注入 demo）
     coll = lambda batch: collate(
-        batch, processor, labels, label_map, use_image, args.img_dir, has_aspect, "STRICT", device=device
+        batch, processor, labels, label_map, use_image, args.img_dir, has_aspect, "STRICT",
+        device=device, demo=demo, dataset_name=dataset_name  
     )
     train_loader = DataLoader(
         train_samples, 
@@ -174,14 +201,16 @@ def main():
         warmup_steps=int(getattr(args, "sp_warmup", 200)),
         step_ckpt_dir=getattr(args, "step_ckpt_dir", None),
         save_every_step=int(getattr(args, "save_every_step", 100)),
+        visual_sp_dropout=float(getattr(args, "visual_sp_dropout", 0.1)),
+        sp_dropout=float(getattr(args, "sp_dropout", 0.0)),
+        target_mode=str(os.getenv("TARGET_MODE", "token")),
     )
 
-    # 初始化Learner（包含视觉Prompt）
     learner = SoftPromptLearner(
         model=model,
         processor=processor,
         template_variants=["STRICT"],
-        demo_provider=DemoProvider.from_env(args, dataset_name=dataset_name, image_base=Path(args.data_dir) / "imgs"),
+        demo_provider=demo,                
         label_space=labels,
         train_cfg=tr_cfg,
         device=device,
@@ -189,7 +218,6 @@ def main():
         n_visual_sp=n_visual_sp
     )
 
-    # 开始训练
     learner.fit(train_loader, dev_loader)
 
 if __name__ == "__main__":

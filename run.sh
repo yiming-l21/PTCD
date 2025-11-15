@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # -------------------- GPU 选择 --------------------
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"6,7,4,2"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"2,4,7"}
 : "${CUDA_VISIBLE_DEVICES:=}"
 
 detect_gpus() {
@@ -32,11 +32,11 @@ export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
-export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-1}"  # 1=仅文本，0=不单独启用
+export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-0}"  # 1=仅文本，0=不单独启用
 export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-0}"  # 1=仅视觉，0=不单独启用
-export USE_DEMO=0
+export USE_DEMO=1
 export SP_N_TOKENS=8
-DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")  
+DATASETS=("mvsa-s" "masad" "t2015" "t2017" "tumemo")  
 
 # 可选：指定 ckpt 目录；若不指定，则默认 /home/lym/VLM-MSA/ckpt/${dataset}
 # export SOFT_DIR="/home/lym/VLM-MSA/ckpt/mvsa-s"
@@ -44,7 +44,7 @@ DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
 # 让空通配不报错
 shopt -s nullglob
 
-for k in 1 2; do
+for k in 1; do
   # topk=1 时两个模式等价，只跑 perclass；topk=2 时跑 perclass 和 balanced
   if [ "$k" -eq 1 ]; then
     MODES=("perclass")

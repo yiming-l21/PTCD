@@ -485,6 +485,8 @@ class TrainCfg:
         "You are a helpful assistant that answers by returning ONE word like \"<class>\"."
     )
     visual_sp_dropout: float = 0.2  # 视觉前缀 dropout（训练时）
+    sp_dropout: float = 0.0          # 文本软提示 dropout（训练时）
+    target_mode: str = "token"       # 生成时启用 JSON 解码辅助
 
 
 class SoftPromptLearner:
@@ -745,7 +747,7 @@ class SoftPromptLearner:
         self,
         dev_loader,
         label_space,
-        max_new_tokens: int = 4,
+        max_new_tokens: int = 32,
     ) -> Tuple[float, float]:
         import time, numpy as np
         from utils import parse_label_from_output
@@ -783,7 +785,7 @@ class SoftPromptLearner:
                     )
                     latencies.append((time.time() - t0) * 1000.0)
 
-                    pred = parse_label_from_output(text_out, label_space)
+                    pred = parse_label_from_output(text_out, label_space,target_mode=self.cfg.target_mode)
                     correct += int(pred == gold_label); total += 1
                     if gold_label in idx_of and pred in idx_of:
                         cm[idx_of[gold_label], idx_of[pred]] += 1
@@ -828,13 +830,20 @@ class SoftPromptLearner:
         try:
             while step < self.cfg.max_steps:
                 for batch in loader:
-                    targets = [lbl for lbl in batch["gold_label_str"]]
+                    if self.cfg.target_mode == "token":
+                        targets = [lbl for lbl in batch["gold_label_str"]]
+                    else:
+                        def label_to_target_json(label: str) -> str:
+                            # 和旧版保持一致：训练时让模型生成 {"label": "<cand>"}
+                            return f'{{"label": "{label}"}}'
+
+                        targets = [label_to_target_json(lbl) for lbl in batch["gold_label_str"]]
                     target_ids = [self.tok(t, add_special_tokens=False)["input_ids"] for t in targets]
                     input_ids2, attn2, labels, others = self._pack_batch(batch["hf_inputs"], target_ids)
 
                     # 文本 Prompt Dropout（视觉前缀的 dropout 在其内部）
                     if not self.visual_only:
-                        self._apply_prompt_dropout(p=0.2)
+                        self._apply_prompt_dropout(p=self.cfg.sp_dropout)
 
                     # 前向
                     with torch.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):

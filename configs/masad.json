@@ -1,0 +1,21 @@
+{
+  "cuda": "5",
+  "nproc": 1,
+  "sp_lr": 2e-4,
+  "sp_steps": 1500,
+  "sp_accum": 1,
+  "sp_warmup": 100,
+  "batch_size": 4,
+  "template_id": 2,
+  "sp_dropout": 0.2,
+  "visual_sp_dropout": 0.2,
+  "sp_n_tokens": 8,
+  "visual_sp_n_tokens": 16,
+  "use_demo": 1,
+  "demo_topk": 1,
+  "demo_mode": "perclass",
+  "train_tsv": "train_few1.tsv",
+  "dev_tsv": "test.tsv",
+  "test_tsv": "test.tsv",
+  "train_jsonl": "/home/lym/VLM-MSA/datasets/masad/train_few1.json"
+}
