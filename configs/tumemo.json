@@ -1,5 +1,5 @@
 {
-  "cuda": "5",
+  "cuda": "4",
   "nproc": 1,
   "sp_lr": 8e-4,
   "sp_steps": 1500,
