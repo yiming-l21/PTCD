@@ -23,19 +23,31 @@ from src.params import build_args, resolve_paths
 from src.dataset import MSADataset
 from src.prompts import build_instruction, build_user_content, build_prompt_variant
 from src.dataset_info import get_labels_and_template
-from src.utils import set_seed, load_model_and_processor, parse_label_from_output, infer_with_variants
+from src.utils import (
+    set_seed,
+    load_model_and_processor,
+    parse_label_from_output,
+    infer_with_variants,
+    build_msgs,        # 新增：用于构造 base/demo 两套 messages
+)
 from src.retrieve_demo import DemoProvider
 from src.prompt_tuning.prompt_learner import load_prompt_ckpt
-from logs.logs import _finalize_and_save,_resolve_pred_field,_write_rag_debug_and_stats
+from src.contrastive_decode import demo_contrastive_decode   # 新增：demo 级对比解码
+from logs.logs import _finalize_and_save, _resolve_pred_field, _write_rag_debug_and_stats
+
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from transformers.utils import logging as hf_logging  # noqa: E402
 from src.infer import (
-    prepare_inputs_from_messages, filter_to_gen_allow,
-    generate_scores_argmax, prompt_eval_guards
+    prepare_inputs_from_messages,
+    filter_to_gen_allow,
+    generate_scores_argmax,
+    prompt_eval_guards,
 )
 hf_logging.set_verbosity_error()
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+
 def _maybe_init_prompt(model, processor, label_space):
     import os, math, torch
 
@@ -231,8 +243,6 @@ def _maybe_init_prompt(model, processor, label_space):
     return True
 
 
-
-
 def _compute_confusion_and_metrics(preds, gts, labels):
     """Return cm(np.int64[K,K]), metrics(dict), and per-class acc(dict)."""
     import numpy as _np
@@ -288,6 +298,7 @@ def _print_and_save_confusion(cm, labels, out_dir, prefix):
         row = " ".join([f"{int(cm[i, j]):>8d}" for j in range(K)])
         print(f"{l:>10} | {row}")
 
+
 @torch.inference_mode()
 def run_one(model, processor, messages, max_new_tokens: int, label_space: List[str]) -> str:
     device = model.device
@@ -303,6 +314,7 @@ def run_one(model, processor, messages, max_new_tokens: int, label_space: List[s
             model, processor, hf_inputs, max_new_tokens=max_new_tokens, decode_clean=False
         )
     return text_out
+
 
 def iter_with_clean_progress(
     samples,
@@ -354,7 +366,7 @@ def iter_with_clean_progress(
     with progress:
         task = progress.add_task("generating", total=total)
         if show_global and is_dist:
-            # Aggregate progress across all ranks
+            # Aggregate progress across ranks
             pending = 0
             for i in local_indices:
                 yield i
@@ -374,6 +386,7 @@ def iter_with_clean_progress(
                 yield i
                 progress.advance(task, 1)
 
+
 def ddp_worker(rank: int, world_size: int, args_dict: dict):
     class _A: pass
     args = _A(); args.__dict__.update(args_dict)
@@ -388,6 +401,10 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     set_seed(args.seed + (rank if is_dist else 0))
+
+    # 是否启用 demo 级对比解码 & target_mode
+    use_demo_contrastive = int(os.getenv("DEMO_CONTRASTIVE", "0")) > 0
+    target_mode_env = os.getenv("TARGET_MODE", "token")
 
     # Data
     dataset_name = Path(args.data_dir).name
@@ -445,35 +462,92 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         )
         demo_diags_by_idx[i] = demo_diag
 
-        final_pred, per_tpl_preds, raw_bundle = infer_with_variants(
-            model=model,
-            processor=processor,
-            prompt_variants=prompt_variants,
-            label_space=label_space,
-            use_image_flag=use_image_flag,
-            img_path=(str(img_path) if img_path is not None else None),
-            user_text=user_text,
-            prefix_demo_msgs=prefix_demo_msgs,
-            max_new_tokens=args.max_new_tokens,
-            run_one_fn=run_one,
-            parse_label_fn=parse_label_from_output,
-            has_aspect=has_aspect,  
-        )
+        # ===== 统一推理逻辑：根据 use_demo_contrastive 二选一 =====
+        per_tpl_preds = None
+        raw_bundle = None
+
+        if use_demo_contrastive:
+            # 仅跑两次：无 demo / 有 demo
+            tpl_main = prompt_variants[0] if len(prompt_variants) > 0 else "STRICT"
+            instruction = build_instruction(
+                labels=label_space,
+                use_image=use_image_flag and (img_path is not None),
+                has_aspect=has_aspect,
+                template_variant=tpl_main,
+            )
+            # 无 demo 的 prompt
+            base_msgs = build_msgs(
+                instruction=instruction,
+                user_text=user_text,
+                use_image=use_image_flag and (img_path is not None),
+                img_path=(str(img_path) if img_path is not None else None),
+                prefix_demo_msgs=[],
+            )
+            # 有 demo 的 prompt
+            demo_msgs = build_msgs(
+                instruction=instruction,
+                user_text=user_text,
+                use_image=use_image_flag and (img_path is not None),
+                img_path=(str(img_path) if img_path is not None else None),
+                prefix_demo_msgs=prefix_demo_msgs,
+            )
+
+            final_pred, demo_debug = demo_contrastive_decode(
+                model=model,
+                processor=processor,
+                base_messages=base_msgs,
+                demo_messages=demo_msgs,
+                label_space=label_space,
+                target_mode=target_mode_env,
+            )
+            # 记录诊断信息
+            demo_diags_by_idx[i].update(demo_debug)
+
+        else:
+            # 原始多模板推理（多数投票）
+            final_pred, per_tpl_preds, raw_bundle = infer_with_variants(
+                model=model,
+                processor=processor,
+                prompt_variants=prompt_variants,
+                label_space=label_space,
+                use_image_flag=use_image_flag,
+                img_path=(str(img_path) if img_path is not None else None),
+                user_text=user_text,
+                prefix_demo_msgs=prefix_demo_msgs,
+                max_new_tokens=args.max_new_tokens,
+                run_one_fn=run_one,
+                parse_label_fn=parse_label_from_output,
+                has_aspect=has_aspect,
+            )
+
+
         local_results.append((i, final_pred))
         local_gts.append((i, label_map[s.label]))
         demo_diags_by_idx[i]["pred"] = final_pred
         demo_diags_by_idx[i]["gold"] = label_map[s.label]
-        if len(prompt_variants) > 1:
+
+        if len(prompt_variants) > 1 and per_tpl_preds is not None:
             demo_diags_by_idx[i]["tpl_preds"] = per_tpl_preds
-        if getattr(args, "dump_raw", False):
+        if getattr(args, "dump_raw", False) and (not use_demo_contrastive) and (raw_bundle is not None):
             if len(prompt_variants) == 1:
                 local_raws.append((i, raw_bundle[0]["raw"]))
             else:
-                local_raws.append((i, json.dumps(
-                    {"tpl_preds": per_tpl_preds, "tpl_raws": raw_bundle}, ensure_ascii=False
-                )))
+                local_raws.append((
+                    i,
+                    json.dumps(
+                        {"tpl_preds": per_tpl_preds, "tpl_raws": raw_bundle},
+                        ensure_ascii=False
+                    )
+                ))
+
         if rank == 0 and (i % 100 == 0):
-            print(f"Sample {i} ground_truth={label_map[s.label]}, final_pred={final_pred}, tpl_preds={per_tpl_preds}", flush=True)
+            tpl_str = per_tpl_preds if per_tpl_preds is not None else "N/A"
+            print(
+                f"Sample {i} ground_truth={label_map[s.label]}, "
+                f"final_pred={final_pred}, tpl_preds={tpl_str}",
+                flush=True
+            )
+
     # Collect results and evaluate
     pred_field = _resolve_pred_field()
     if is_dist:
@@ -514,10 +588,12 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
         if demo.use_demo:
             _write_rag_debug_and_stats(dataset_name, pred_field, samples_meta, demo_diags_by_idx, preds, gts)
 
+
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
 
 def main():
     args = resolve_paths(build_args())
@@ -537,6 +613,7 @@ def main():
         mp.spawn(ddp_worker, args=(world_size, args.__dict__), nprocs=world_size, join=True)
     else:
         ddp_worker(rank=0, world_size=1, args_dict=args.__dict__)
+
 
 if __name__ == "__main__":
     main()
