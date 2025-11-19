@@ -145,7 +145,7 @@ def main():
     )
     ratio4dataset={"t2017": 0.8, "t2015":0.3, "tumemo":0.7, "masad":0.9 }
     # if dataset_name in ["t2017", "tumemo", "t2015"]:
-    enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.5))
+    enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.1))
     print("model dtype", model.dtype)
     gpu_mem_snapshot(prefix="[after load ] ")
 
@@ -204,6 +204,7 @@ def main():
         visual_sp_dropout=float(getattr(args, "visual_sp_dropout", 0.1)),
         sp_dropout=float(getattr(args, "sp_dropout", 0.0)),
         target_mode=str(os.getenv("TARGET_MODE", "token")),
+        ensemble_mode=str(os.getenv("ENSEMBLE_MODE", "EMA")),
     )
 
     learner = SoftPromptLearner(

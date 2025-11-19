@@ -4,11 +4,11 @@ set -euo pipefail
 ############################################
 # 可改区：核心配置（按需调整）
 ############################################
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,7}"
 export SP_N_TOKENS="${SP_N_TOKENS:-8}"
 export VISUAL_SP_N_TOKENS="${VISUAL_SP_N_TOKENS:-16}"
 export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-0}"
-export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-0}"
+export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-1}"
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NPROC="${NPROC:-1}"
@@ -25,7 +25,7 @@ IMG_DIR="datasets/${DATASETS}/imgs"
 export TRAIN_JSONL="${TRAIN_JSONL:-/home/lym/VLM-MSA/datasets/${DATASETS}/train_few1.json}"
 
 # 输出目录
-CKPT_DIR="/home/lym/VLM-MSA/ckpt/${DATASETS}"
+CKPT_DIR="/home/lym/VLM-MSA/ckpt2/${DATASETS}"
 STEP_CKPT_DIR="${CKPT_DIR}/step_ckpts"
 LOG_FILE="${CKPT_DIR}/train.log"
 
@@ -144,8 +144,8 @@ ARGS=(
   --visual_sp_dropout "$VIS_DROPOUT_VAL"
   --seed          34
   --template_id   "$TPL_ID_VAL"
-  --eval_every    100
-  --log_every     50
+  --eval_every    500
+  --log_every     500
 )
 
 ############################################

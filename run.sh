@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # -------------------- GPU 选择 --------------------
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"2,4,5"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
 : "${CUDA_VISIBLE_DEVICES:=}"
 
 detect_gpus() {
@@ -34,9 +34,11 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-0}"  # 1=仅文本，0=不单独启用
 export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-0}"  # 1=仅视觉，0=不单独启用
-export USE_DEMO=1
+export USE_DEMO=0
 export SP_N_TOKENS=8
-export DEMO_CONTRASTIVE=1
+export DEMO_CONTRASTIVE=0
+export TARGET_MODE="token"
+export MODES="perclass"
 DATASETS=("mvsa-s")  
 
 # 可选：指定 ckpt 目录；若不指定，则默认 /home/lym/VLM-MSA/ckpt/${dataset}
@@ -50,7 +52,7 @@ for k in 1; do
   if [ "$k" -eq 1 ]; then
     MODES=("perclass")
   else
-    MODES=("perclass" "balanced")
+    MODES="global"
   fi
   if [ "$USE_DEMO" -eq 0 ]; then
     MODES=("none")
@@ -69,10 +71,15 @@ for k in 1; do
     for dataset in "${DATASETS[@]}"; do
       echo "[start] dataset: ${dataset}"
       export TRAIN_JSONL="/home/lym/VLM-MSA/datasets/${dataset}/train_few1.json"
+      if [ "$dataset" == "t2015" ] || [ "$dataset" == "t2017" ] || [ "$dataset" == "tumemeo" ]; then
+        export TARGET_MODE="json"
+      else
+        export TARGET_MODE="token"
+      fi
 
       # --------- 修复：遍历主目录+step_ckpts目录下所有ckpt ----------
       # 目录优先级：SOFT_DIR（若设置） -> /home/lym/VLM-MSA/ckpt/${dataset}
-      CKPT_DIR="${SOFT_DIR:-/home/lym/VLM-MSA/ckpt/${dataset}}"
+      CKPT_DIR="${SOFT_DIR:-/home/lym/VLM-MSA/ckpt2/${dataset}}"
       STEP_CKPT_DIR="${CKPT_DIR}/step_ckpts"  # 按步保存的子目录
       if [[ ! -d "${CKPT_DIR}" ]]; then
         echo "[WARN] ckpt dir not found: ${CKPT_DIR} (skip dataset ${dataset})"

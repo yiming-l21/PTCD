@@ -17,24 +17,67 @@ from infer import (
 # =========================================================
 #                   视觉前缀注入（新实现）
 # =========================================================
+def _aggregate_tensor_list_inmem(
+    tensors: List[torch.Tensor],
+    method: str = "ema",
+    ema_decay: float = 0.9,
+    weights: Optional[List[float]] = None,
+) -> torch.Tensor:
+    """
+    对若干个形状相同的 tensor 做集成（内存版）。
+    支持：
+      - mean
+      - ema
+      - loss_inv（按 1/loss 加权）
+    """
+    assert len(tensors) > 0
+    method = method.lower()
+
+    if method == "mean":
+        acc = torch.zeros_like(tensors[0], dtype=torch.float32)
+        for t in tensors:
+            acc += t.to(torch.float32)
+        return acc / float(len(tensors))
+
+    if method == "ema":
+        ema = tensors[0].to(torch.float32)
+        for t in tensors[1:]:
+            ema = ema * ema_decay + t.to(torch.float32) * (1.0 - ema_decay)
+        return ema
+
+    if method == "loss_inv":
+        if not weights or len(weights) != len(tensors):
+            raise ValueError("method='loss_inv' 时需要同长度的 weights 列表")
+        w = torch.tensor(weights, dtype=torch.float32)
+        w = torch.clamp(w, min=1e-8)
+        w = w / w.sum()
+        acc = torch.zeros_like(tensors[0], dtype=torch.float32)
+        for wi, ti in zip(w, tensors):
+            acc += wi * ti.to(torch.float32)
+        return acc
+
+    raise ValueError(f"未知集成方式：{method}")
 
 def save_prompt_ckpt(path: str, state: Dict):
     """
-    安全保存 checkpoint：
+    简化版安全保存：
     1) 确保目录存在
-    2) 先写入临时文件，再原子重命名，避免半写入损坏
+    2) 如果 path 是目录，则在目录下生成一个默认文件名
+    3) 先写入 path + ".tmp"
+    4) 再原子重命名为最终路径
     """
+    # 如果用户给的是目录，把它变成目录下的一个标准文件名
+    if os.path.isdir(path):
+        path = os.path.join(path, "prompt_ckpt_ensemble.pt")
+
     dirname = os.path.dirname(path)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
 
-    # 使用同目录临时文件，确保跨分区 rename 不失败
-    dir_for_tmp = dirname if dirname else "."
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_ckpt_", dir=dir_for_tmp)
-    os.close(fd)
+    tmp_path = path + ".tmp"
     try:
         torch.save(state, tmp_path)
-        os.replace(tmp_path, path)  # 原子替换（POSIX/Windows 3.8+）
+        os.replace(tmp_path, path)
         print(f"[save] 模型已保存到：{path}")
     except Exception as e:
         try:
@@ -43,6 +86,7 @@ def save_prompt_ckpt(path: str, state: Dict):
         except Exception:
             pass
         raise RuntimeError(f"保存 checkpoint 失败：{path} -> {e}") from e
+
 
 
 def load_prompt_ckpt(path: str, map_location="cpu") -> Dict:
@@ -487,6 +531,7 @@ class TrainCfg:
     visual_sp_dropout: float = 0.2  # 视觉前缀 dropout（训练时）
     sp_dropout: float = 0.0          # 文本软提示 dropout（训练时）
     target_mode: str = "token"       # 生成时启用 JSON 解码辅助
+    ensemble_mode: str = "none"
 
 
 class SoftPromptLearner:
@@ -541,7 +586,15 @@ class SoftPromptLearner:
         self.template_variants = template_variants
         self.use_image = use_image
         self.n_visual_sp = n_visual_sp if not self.text_only else 0
-
+        mode = (getattr(self.cfg, "ensemble_mode", "none") or "none").lower()
+        if mode in ("ema", "mean", "loss"):
+            self._ensemble_mode = mode
+            print(f"[ensemble] 启用训练后集成模式：{self._ensemble_mode.upper()}")
+        else:
+            self._ensemble_mode = "none"
+        self._ens_soft_vecs: List[Optional[torch.Tensor]] = []
+        self._ens_vp_states: List[Optional[Dict[str, Any]]] = []
+        self._ens_losses: List[float] = []
         # step 目录
         if self.cfg.step_ckpt_dir:
             os.makedirs(self.cfg.step_ckpt_dir, exist_ok=True)
@@ -719,7 +772,33 @@ class SoftPromptLearner:
         self.soft_param.normal_(mean=mean, std=std)
         print(f"[init] soft prompts initialized from Gaussian N({mean:.3f}, {std:.3f}^2)")
 
+    def _cache_for_ensemble(self, step: int, current_loss: float):
+        """
+        在内存里缓存当前 step 的软提示参数，用于训练结束后的集成。
+        只在 ensemble_mode != 'none' 时被调用。
+        """
+        # 文本软提示
+        if (self.soft_param is not None) and (not self.visual_only):
+            self._ens_soft_vecs.append(self.soft_param.detach().cpu())
+        else:
+            self._ens_soft_vecs.append(None)
+
+        # 视觉前缀
+        if self.vp is not None:
+            self._ens_vp_states.append(self.vp.state_dict())
+        else:
+            self._ens_vp_states.append(None)
+
+        self._ens_losses.append(float(current_loss))
+        print(f"[ensemble] 缓存 step={step} 的软提示参数用于后续集成（loss={current_loss:.6f}）")
+
     def _save_step_ckpt(self, step: int, current_loss: float, current_lr: float):
+        # 如果开启了集成模式：不再写中间 ckpt 到磁盘，只在内存里缓存当前软提示
+        if self._ensemble_mode in ("ema", "mean", "loss"):
+            self._cache_for_ensemble(step, current_loss)
+            return
+
+        # ====== 以下是原有逻辑，不动，保证 ensemble_mode='none' 时行为不变 ======
         if not self.cfg.step_ckpt_dir:
             return
         step_ckpt_path = os.path.join(self.cfg.step_ckpt_dir, f"prompt_ckpt_step_{step:06d}.pt")
@@ -741,6 +820,94 @@ class SoftPromptLearner:
         if dirname:
             os.makedirs(dirname, exist_ok=True)
         torch.save(step_save_dict, step_ckpt_path)
+
+    def _save_ensemble_final_ckpt(self):
+        """
+        在训练结束时调用：
+          - 如果 ensemble_mode='none'：什么都不做
+          - 如果 ensemble_mode in {EMA,MEAN,LOSS}：
+              对缓存的软提示进行集成，并保存到 cfg.save_ckpt
+        """
+        if self._ensemble_mode not in ("ema", "mean", "loss"):
+            return
+
+        if not self._ens_soft_vecs and not self._ens_vp_states:
+            print("[ensemble] 未缓存任何软提示参数，跳过集成")
+            return
+
+        # 映射到内部聚合方法
+        if self._ensemble_mode == "loss":
+            agg_method = "loss_inv"
+        else:
+            agg_method = self._ensemble_mode  # ema / mean
+
+        ema_decay = 0.9  # 你也可以做成 cfg 或 env
+
+        weights = None
+        if agg_method == "loss_inv":
+            # 按 1/loss 加权
+            losses = [max(l, 1e-8) for l in self._ens_losses]
+            weights = [1.0 / l for l in losses]
+
+        # 构造结果字典
+        result: Dict[str, Any] = {
+            "text_only": self.text_only,
+            "visual_only": self.visual_only,
+            "soft_tokens": (
+                self.soft_tokens if (self.soft_param is not None and not self.visual_only) else None
+            ),
+            "meta": {
+                "ensemble_method": agg_method,
+                "ema_decay": ema_decay,
+                "num_sources": len(self._ens_losses),
+            },
+        }
+
+        # ========= 文本 soft prompt 集成 =========
+        has_text_sp = (self.soft_param is not None) and (not self.visual_only)
+        if has_text_sp:
+            soft_tensors = [t for t in self._ens_soft_vecs if t is not None]
+            if soft_tensors:
+                sp_agg = _aggregate_tensor_list_inmem(
+                    soft_tensors,
+                    method=agg_method,
+                    ema_decay=ema_decay,
+                    weights=weights,
+                )
+                result["soft_vecs"] = sp_agg
+                print(f"[ensemble] 文本 soft prompt 集成完成，shape={tuple(sp_agg.shape)}")
+            else:
+                print("[ensemble] 警告：未找到可用于集成的文本 soft prompt 快照")
+
+        # ========= 视觉前缀 vp_state 集成 =========
+        vp_states = [v for v in self._ens_vp_states if v is not None]
+        if vp_states:
+            first_vp = vp_states[0]
+            vp_agg: Dict[str, Any] = {}
+            # 非 tensor 字段原样拷贝
+            for k, v in first_vp.items():
+                if not isinstance(v, torch.Tensor):
+                    vp_agg[k] = v
+            # tensor 字段逐键集成
+            vp_keys = [k for k, v in first_vp.items() if isinstance(v, torch.Tensor)]
+            for k in vp_keys:
+                tensors_k = []
+                for vs in vp_states:
+                    if k not in vs:
+                        raise RuntimeError(f"[ensemble] 某个 vp_state 缺少键：{k}")
+                    tensors_k.append(vs[k])
+                vp_agg[k] = _aggregate_tensor_list_inmem(
+                    tensors_k,
+                    method=agg_method,
+                    ema_decay=ema_decay,
+                    weights=weights,
+                )
+            result["vp_state"] = vp_agg
+            print(f"[ensemble] 视觉前缀 vp_state 集成完成，keys={list(vp_agg.keys())}")
+
+        out_path = self.cfg.save_ckpt
+        save_prompt_ckpt(out_path, result)
+        print(f"[ensemble] 集成后的软提示 ckpt 已保存到：{out_path}")
 
     @torch.no_grad()
     def eval_like_infer_generation(
@@ -987,8 +1154,10 @@ class SoftPromptLearner:
             if self.vp is not None:
                 self.vp.remove()
                 print(f"[visual-hook] 视觉前缀钩子已移除")
+        self._save_ensemble_final_ckpt()
 
         print(f"[训练完成] 最佳模型准确率：{best_metric:.4f}（step={step}）")
+
 
     # ---------- Batch 打包 ----------
     def _pack_batch(
