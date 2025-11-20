@@ -514,7 +514,7 @@ class TrainCfg:
     save_ckpt: str = "prompt_ckpt/final.pt"
     use_fp16: bool = True
 
-    eval_every: int = 100
+    eval_every: int = 200
     ckpt_best: str = "prompt_ckpt/best.pt"
     step_ckpt_dir: Optional[str] = "prompt_ckpt/step_ckpts"
     save_every_step: int = 100
@@ -821,19 +821,19 @@ class SoftPromptLearner:
             os.makedirs(dirname, exist_ok=True)
         torch.save(step_save_dict, step_ckpt_path)
 
-    def _save_ensemble_final_ckpt(self):
+    def _save_ensemble_final_ckpt(self) -> Optional[Dict[str, Any]]:
         """
         在训练结束时调用：
-          - 如果 ensemble_mode='none'：什么都不做
+          - 如果 ensemble_mode='none'：返回 None
           - 如果 ensemble_mode in {EMA,MEAN,LOSS}：
-              对缓存的软提示进行集成，并保存到 cfg.save_ckpt
+              对缓存的软提示进行集成，保存到 cfg.save_ckpt，并返回集成结果 dict
         """
         if self._ensemble_mode not in ("ema", "mean", "loss"):
-            return
+            return None
 
         if not self._ens_soft_vecs and not self._ens_vp_states:
             print("[ensemble] 未缓存任何软提示参数，跳过集成")
-            return
+            return None
 
         # 映射到内部聚合方法
         if self._ensemble_mode == "loss":
@@ -909,13 +909,16 @@ class SoftPromptLearner:
         save_prompt_ckpt(out_path, result)
         print(f"[ensemble] 集成后的软提示 ckpt 已保存到：{out_path}")
 
+        return result
+
+
     @torch.no_grad()
     def eval_like_infer_generation(
         self,
         dev_loader,
         label_space,
         max_new_tokens: int = 32,
-    ) -> Tuple[float, float]:
+    ):
         import time, numpy as np
         from utils import parse_label_from_output
 
@@ -927,7 +930,8 @@ class SoftPromptLearner:
 
         labels = list(label_space)
         idx_of = {c: i for i, c in enumerate(labels)}
-        C = len(labels); cm = np.zeros((C, C), dtype=int)
+        C = len(labels)
+        cm = np.zeros((C, C), dtype=int)
 
         row_replacer = getattr(self, "_row_replacer", None)
         vp_core = getattr(getattr(self, "vp", None), "core", None)
@@ -939,7 +943,7 @@ class SoftPromptLearner:
                     gold_label = batch["gold_label_str"][i]
                     hf_inputs_full = batch["hf_inputs"]
                     hf_inputs = filter_to_gen_allow(hf_inputs_full, take_index=i)
-                    # dtype/设备放到 generate 前保证（多数张量已在 collate 时到位）
+
                     for k, v in list(hf_inputs.items()):
                         if torch.is_tensor(v):
                             hf_inputs[k] = v.to(self.device)
@@ -948,25 +952,45 @@ class SoftPromptLearner:
                     text_out, _ = generate_scores_argmax(
                         self.model, self.tok, hf_inputs,
                         max_new_tokens=max_new_tokens,
-                        decode_clean=False,             
+                        decode_clean=False,
                     )
                     latencies.append((time.time() - t0) * 1000.0)
 
-                    pred = parse_label_from_output(text_out, label_space,target_mode=self.cfg.target_mode)
-                    correct += int(pred == gold_label); total += 1
+                    pred = parse_label_from_output(text_out, label_space, target_mode=self.cfg.target_mode)
+
+                    correct += int(pred == gold_label)
+                    total += 1
+
                     if gold_label in idx_of and pred in idx_of:
                         cm[idx_of[gold_label], idx_of[pred]] += 1
 
+        # ---------- 计算 acc ----------
         acc = correct / max(total, 1)
+
+        # ---------- 计算 micro-F1 ----------
+        tp = np.diag(cm).sum()
+        fp = cm.sum(axis=0).sum() - tp
+        fn = cm.sum(axis=1).sum() - tp
+        micro_f1 = 2 * tp / max(2 * tp + fp + fn, 1)
+
+        # ---------- 计算 macro-F1 & per-class-F1 ----------
+        f1_list = []
+        per_class_f1 = {}
+        for i in range(C):
+            tp_i = cm[i, i]
+            fp_i = cm[:, i].sum() - tp_i
+            fn_i = cm[i, :].sum() - tp_i
+            f1_i = 2 * tp_i / max(2 * tp_i + fp_i + fn_i, 1)
+            f1_list.append(f1_i)
+            per_class_f1[labels[i]] = float(f1_i)
+
+        macro_f1 = float(np.mean(f1_list))
+
         avg_latency = float(sum(latencies) / max(len(latencies), 1)) if latencies else 0.0
 
-        per_cls = {}
-        for c in range(C):
-            n = cm[c].sum()
-            per_cls[labels[c]] = (cm[c, c] / n) if n > 0 else 0.0
+        print(f"\n[eval] acc={acc:.4f} micro_f1={micro_f1:.4f} macro_f1={macro_f1:.4f}")
+        print(f"[eval] per-class F1: " + ", ".join(f"{k}:{v:.4f}" for k, v in per_class_f1.items()))
 
-        print(f"\n[eval] 准确率(acc)={acc:.4f} 平均延迟(ms)={avg_latency:.1f}")
-        print(f"[eval] 每类准确率: " + ", ".join(f"{k}:{v:.4f}" for k, v in per_cls.items()))
         print("[eval] 混淆矩阵（行=真实标签，列=预测标签）:")
         for r in range(C):
             row = " ".join(f"{cm[r, c]:3d}" for c in range(C))
@@ -974,7 +998,9 @@ class SoftPromptLearner:
         print()
 
         self.model.train()
-        return acc, avg_latency
+
+        return acc, macro_f1, micro_f1, per_class_f1, avg_latency
+
 
 
 
@@ -989,7 +1015,7 @@ class SoftPromptLearner:
         step = 0
         best_metric = -float("inf")
         gnorm_cache = 0.0
-
+        early_stop_counter = 0
         print(f"\n[train] 开始训练，总步数：{self.cfg.max_steps}，梯度累积步数：{self.cfg.grad_accum}")
         print(f"[train] 评估间隔：{self.cfg.eval_every}步，早停耐心值：{self.cfg.early_stop_patience}")
         print(f"[train] 训练模式：{'仅文本软提示' if self.text_only else ('仅视觉前缀' if self.visual_only else '文本+视觉')}\n")
@@ -1085,7 +1111,7 @@ class SoftPromptLearner:
                             self.scheduler.step()
 
                     # 日志（注意：梯度值取自累积边界时缓存）
-                    if (step % self.cfg.log_every) == 0:
+                    if (step % self.cfg.eval_every) == 0:
                         lr = self.opt.param_groups[0]["lr"]
                         with torch.no_grad():
                             text_cos = 0.0
@@ -1119,7 +1145,7 @@ class SoftPromptLearner:
 
                     # 评估与最佳
                     if (self.cfg.eval_every > 0) and (dev_loader is not None) and (step % self.cfg.eval_every == 0):
-                        val_acc, val_lat = self.eval_like_infer_generation(dev_loader, self.label_space)
+                        val_acc, macro_f1, micro_f1, per_class_f1, val_lat = self.eval_like_infer_generation(dev_loader, self.label_space)
                         if val_acc > best_metric:
                             best_metric = val_acc
                             best_save_dict = {
@@ -1151,10 +1177,31 @@ class SoftPromptLearner:
                     if step >= self.cfg.max_steps:
                         break
         finally:
+            # 1) 先做集成，得到最终 soft prompt 状态（如果启用了 ensemble）
+            ens_state = self._save_ensemble_final_ckpt()
+
+            # 2) 如果有 dev_loader，就对“最终状态”做一次统一评估
             if dev_loader is not None:
-                print("[train] 训练结束，对当前软提示在验证集上做一次统一评估...")
+                print("[train] 训练结束，对最终软提示在验证集上做一次统一评估...")
+
+                # 如果存在集成结果，就把集成后的参数写回 runtime，再评估
+                if ens_state is not None:
+                    print("[train] 应用集成后的软提示参数再进行评估（ensemble final）")
+
+                    # 文本 soft prompt
+                    if (self.soft_param is not None) and (not self.visual_only) and ("soft_vecs" in ens_state):
+                        sp = ens_state["soft_vecs"]
+                        self.soft_param.data.copy_(sp.to(self.soft_param.device, dtype=self.soft_param.dtype))
+                        # soft_init 也更新一下，避免正则项用的还是老的
+                        if self.soft_init is not None:
+                            self.soft_init.data.copy_(self.soft_param.data)
+
+                    # 视觉前缀
+                    if (self.vp is not None) and ("vp_state" in ens_state):
+                        self.vp.load_state_dict(ens_state["vp_state"])
+
                 try:
-                    final_acc, final_lat = self.eval_like_infer_generation(
+                    final_acc, final_macro_f1, final_micro_f1, final_per_class_f1, final_lat = self.eval_like_infer_generation(
                         dev_loader,
                         self.label_space,
                     )
@@ -1164,10 +1211,11 @@ class SoftPromptLearner:
                     )
                 except Exception as e:
                     print(f"[train] 结束时 eval 失败：{e}")
+
+            # 3) 最后再移除视觉前缀 hook，避免后续误用
             if self.vp is not None:
                 self.vp.remove()
                 print(f"[visual-hook] 视觉前缀钩子已移除")
-        self._save_ensemble_final_ckpt()
 
         print(f"[训练完成] 最佳模型准确率：{best_metric:.4f}（step={step}）")
 

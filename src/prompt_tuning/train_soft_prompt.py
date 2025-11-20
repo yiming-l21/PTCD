@@ -207,6 +207,8 @@ def main():
         sp_dropout=float(getattr(args, "sp_dropout", 0.0)),
         target_mode=str(os.getenv("TARGET_MODE", "token")),
         ensemble_mode=str(os.getenv("ENSEMBLE_MODE", "EMA")),
+        eval_every=int(getattr(args, "eval_every", 200)),
+        log_every=int(getattr(args, "log_every", 100))  
     )
 
     learner = SoftPromptLearner(

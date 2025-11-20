@@ -7,8 +7,8 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,7}"
 export SP_N_TOKENS="${SP_N_TOKENS:-8}"
 export VISUAL_SP_N_TOKENS="${VISUAL_SP_N_TOKENS:-16}"
-export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-0}"
-export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-1}"
+export TEXT_PROMPT_ONLY="${TEXT_PROMPT_ONLY:-1}"
+export VISUAL_PROMPT_ONLY="${VISUAL_PROMPT_ONLY:-0}"
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NPROC="${NPROC:-1}"
@@ -144,8 +144,8 @@ ARGS=(
   --visual_sp_dropout "$VIS_DROPOUT_VAL"
   --seed          34
   --template_id   "$TPL_ID_VAL"
-  --eval_every    500
-  --log_every     500
+  --eval_every    200
+  --log_every     200
 )
 
 ############################################
