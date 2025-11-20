@@ -17,7 +17,7 @@ export SAVE_EVERY_STEP="${SAVE_EVERY_STEP:-100}"
 MODEL="/home/lym/models/qwen2.5_vl"
 
 # 数据集名
-DATASETS="mvsa-s"
+DATASETS="t2015"
 DATA_DIR="datasets/${DATASETS}"
 IMG_DIR="datasets/${DATASETS}/imgs"
 

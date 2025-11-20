@@ -50,8 +50,8 @@ def build_args():
     p.add_argument('--sp_ckpt', type=str, default='prompt_ckpt.pt', help='最终checkpoint保存路径')
     p.add_argument('--sp_best', type=str, default='prompt_ckpt.best.pt', help='最优checkpoint保存路径')
     p.add_argument('--sp_dropout', type=float, default=0.2, help='文本软提示dropout概率')
-    p.add_argument('--log_every', type=int, default=50, help='每多少步打印一次训练日志')
-    p.add_argument('--eval_every', type=int, default=100, help='每多少步进行一次验证评估')
+    p.add_argument('--log_every', type=int, default=100, help='每多少步打印一次训练日志')
+    p.add_argument('--eval_every', type=int, default=500, help='每多少步进行一次验证评估')
     p.add_argument('--save_every_step', type=int, default=100, help='每多少步保存一次中间checkpoint')
     p.add_argument('--step_ckpt_dir', type=str, default=None, help='中间checkpoint保存目录（不保存则为 None）')
 

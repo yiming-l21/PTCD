@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # -------------------- GPU 选择 --------------------
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"5,7"}
 : "${CUDA_VISIBLE_DEVICES:=}"
 
 detect_gpus() {
@@ -39,7 +39,7 @@ export SP_N_TOKENS=8
 export DEMO_CONTRASTIVE=0
 export TARGET_MODE="token"
 export MODES="perclass"
-DATASETS=("mvsa-s")  
+DATASETS=("t2015")  
 
 # 可选：指定 ckpt 目录；若不指定，则默认 /home/lym/VLM-MSA/ckpt/${dataset}
 # export SOFT_DIR="/home/lym/VLM-MSA/ckpt/mvsa-s"

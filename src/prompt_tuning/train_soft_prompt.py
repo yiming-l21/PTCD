@@ -32,8 +32,9 @@ def collate(
     gold = []
     for s in samples:
         img_path = (str((img_root / s.img_id)) if (use_image and s.img_id) else None)
-        user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect)
-        instruction = build_instruction(labels, use_image, has_aspect, tpl)
+        target_mode_env = str(os.getenv("TARGET_MODE", "token"))
+        user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect, target_mode=target_mode_env)
+        instruction = build_instruction(labels, use_image, has_aspect, tpl, target_mode=target_mode_env)
         sample_idx = getattr(s, "_idx", None)
         prefix_demo_msgs = []
         if demo is not None and sample_idx is not None:
@@ -144,7 +145,7 @@ def main():
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map=device
     )
-    ratio4dataset={"t2017": 0.8, "t2015":0.3, "tumemo":0.7, "masad":0.9 }
+    ratio4dataset={"t2017": 0.4, "t2015":0.3, "tumemo":0.7, "masad":0.9 }
     # if dataset_name in ["t2017", "tumemo", "t2015"]:
     enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.1))
     print("model dtype", model.dtype)

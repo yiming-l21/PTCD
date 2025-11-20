@@ -454,7 +454,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
             if cand.exists():
                 img_path = cand
 
-        user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect)
+        user_text = build_user_content(s.text_s, getattr(s, "text_a", None), has_aspect=has_aspect, target_mode=target_mode_env)
 
         # ---------- build demos from offline index + diagnostics----------
         prefix_demo_msgs, demo_diag = demo.for_query(
@@ -474,6 +474,7 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 use_image=use_image_flag and (img_path is not None),
                 has_aspect=has_aspect,
                 template_variant=tpl_main,
+                target_mode = target_mode_env,
             )
             # 无 demo 的 prompt
             base_msgs = build_msgs(

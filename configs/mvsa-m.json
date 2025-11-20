@@ -1,5 +1,5 @@
 {
-  "cuda": "4",
+  "cuda": "5",
   "nproc": 1,
   "batch_size": 4,
   "sp_lr": 1e-4,

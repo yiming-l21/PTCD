@@ -1151,6 +1151,19 @@ class SoftPromptLearner:
                     if step >= self.cfg.max_steps:
                         break
         finally:
+            if dev_loader is not None:
+                print("[train] 训练结束，对当前软提示在验证集上做一次统一评估...")
+                try:
+                    final_acc, final_lat = self.eval_like_infer_generation(
+                        dev_loader,
+                        self.label_space,
+                    )
+                    print(
+                        f"[train] 结束时 eval：acc={final_acc:.4f} "
+                        f"avg_latency={final_lat:.1f}ms"
+                    )
+                except Exception as e:
+                    print(f"[train] 结束时 eval 失败：{e}")
             if self.vp is not None:
                 self.vp.remove()
                 print(f"[visual-hook] 视觉前缀钩子已移除")

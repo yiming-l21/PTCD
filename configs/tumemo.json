@@ -2,7 +2,7 @@
   "cuda": "2",
   "nproc": 1,
   "sp_lr": 8e-4,
-  "sp_steps": 1500,
+  "sp_steps": 1000,
   "sp_accum": 1,
   "sp_warmup": 100,
   "batch_size": 4,

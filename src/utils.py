@@ -160,13 +160,14 @@ def infer_with_variants(
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
     per_tpl_preds: List[str] = []
     raw_bundle: List[Dict[str, Any]] = []
-
+    target_mode_env = os.getenv("TARGET_MODE", "token")
     for tpl in prompt_variants:
         instruction = build_instruction(
             labels=label_space,
             use_image=use_image_flag and (img_path is not None),
             has_aspect=has_aspect,           
             template_variant=tpl,
+            target_mode=target_mode_env,
         )
         msgs = build_msgs(
             instruction=instruction,
@@ -176,7 +177,7 @@ def infer_with_variants(
             prefix_demo_msgs=prefix_demo_msgs,
         )
         raw = run_one_fn(model, processor, msgs, max_new_tokens=max_new_tokens, label_space=label_space)
-        pred = parse_label_fn(raw, label_space)
+        pred = parse_label_fn(raw, label_space, target_mode=target_mode_env)
         per_tpl_preds.append(pred)
         raw_bundle.append({"tpl": tpl, "raw": raw})
 
