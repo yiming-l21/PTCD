@@ -461,7 +461,11 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
             i, label_map=label_map, dataset_name=dataset_name
         )
         demo_diags_by_idx[i] = demo_diag
-
+        base_diag = {
+            "idx": i,
+            "sample_id": samples_meta[i].get("id", str(i)),  # 如果 meta 里有 id，就用；否则就用 idx
+            "rag": demo_diag,        # 检索相关的信息整体放这里
+        }
         # ===== 统一推理逻辑：根据 use_demo_contrastive 二选一 =====
         per_tpl_preds = None
         raw_bundle = None
@@ -501,8 +505,27 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 label_space=label_space,
                 target_mode=target_mode_env,
             )
+            rec = dict(base_diag)
+            rec.update({
+                "gold": label_map[s.label],
+                "pred_final": final_pred,
+
+                # 从 demo_debug 里展开
+                "y0": demo_debug["y0"],
+                "yD": demo_debug["yD"],
+                "y_final": demo_debug["y_final"],  # == final_pred
+
+                "c0": demo_debug["c0"],
+                "cD": demo_debug["cD"],
+                "delta_c": demo_debug["delta_c"],
+                "sim": demo_debug["sim"],
+                "alpha": demo_debug["alpha"],
+
+                "z0": demo_debug["z0"],
+                "zD": demo_debug["zD"],
+            })
             # 记录诊断信息
-            demo_diags_by_idx[i].update(demo_debug)
+            demo_diags_by_idx[i] = rec
 
         else:
             # 原始多模板推理（多数投票）
@@ -520,12 +543,16 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
                 parse_label_fn=parse_label_from_output,
                 has_aspect=has_aspect,
             )
+            rec = dict(base_diag)
+            rec.update({
+                "gold": label_map[s.label],
+                "pred_final": final_pred,
+            })
+            demo_diags_by_idx[i] = rec
 
 
         local_results.append((i, final_pred))
         local_gts.append((i, label_map[s.label]))
-        demo_diags_by_idx[i]["pred"] = final_pred
-        demo_diags_by_idx[i]["gold"] = label_map[s.label]
 
         if len(prompt_variants) > 1 and per_tpl_preds is not None:
             demo_diags_by_idx[i]["tpl_preds"] = per_tpl_preds

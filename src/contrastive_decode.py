@@ -171,5 +171,7 @@ def demo_contrastive_decode(
         "delta_c": delta_c,
         "sim": sim,
         "alpha": alpha,
+        "z0": z0.detach().cpu().tolist(),
+        "zD": zD.detach().cpu().tolist(),
     }
     return y_final, debug
