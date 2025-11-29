@@ -40,9 +40,14 @@ def _aggregate_tensor_list_inmem(
         return acc / float(len(tensors))
 
     if method == "ema":
-        ema = tensors[0].to(torch.float32)
-        for t in tensors[1:]:
-            ema = ema * ema_decay + t.to(torch.float32) * (1.0 - ema_decay)
+        decay = ema_decay
+        ema = torch.zeros_like(tensors[0], dtype=torch.float32)
+        for t in tensors:
+            ema = ema * decay + t.to(torch.float32) * (1.0 - decay)
+        K = len(tensors)
+        norm = 1.0 - (decay ** K)
+        if norm > 0:
+            ema = ema / norm
         return ema
 
     if method == "loss_inv":

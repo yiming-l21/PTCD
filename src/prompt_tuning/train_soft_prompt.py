@@ -147,7 +147,7 @@ def main():
     )
     ratio4dataset={"t2017": 0.4, "t2015":0.3, "tumemo":0.7, "masad":0.9 }
     # if dataset_name in ["t2017", "tumemo", "t2015"]:
-    enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.1))
+    enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.5))
     print("model dtype", model.dtype)
     gpu_mem_snapshot(prefix="[after load ] ")
 
