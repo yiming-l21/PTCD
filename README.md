@@ -24,12 +24,24 @@ PTCD has two stages.
 
 The VLM backbone is frozen. PTCD adds trainable textual soft tokens to the tokenizer/embedding space and visual prefix tokens to the vision stream. Only these prompt parameters are updated, requiring less than 1% of the full model parameters.
 
+<p align="center">
+  <img src="assets/1.png" alt="PTCD training stage: multimodal prompt tuning" width="95%">
+</p>
+
+<p align="center"><em>Training stage: textual soft tokens and visual prefix tokens are optimized while the VLM backbone remains frozen.</em></p>
+
 **2. Retrieval-Augmented Contrastive Decoding**
 
 At inference time, PTCD builds two branches for each query:
 
 - `base`: prompt-tuned prediction without retrieved demonstrations.
 - `demo`: prompt-tuned prediction with retrieved in-context demonstrations.
+
+<p align="center">
+  <img src="assets/2.png" alt="PTCD inference stage: retrieval-augmented contrastive decoding" width="95%">
+</p>
+
+<p align="center"><em>Inference stage: PTCD retrieves multimodal demonstrations, compares base and demo branches, and adaptively fuses their label distributions.</em></p>
 
 The final label distribution is fused as:
 
