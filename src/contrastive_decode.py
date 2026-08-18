@@ -115,9 +115,9 @@ def demo_contrastive_decode(
     device = model.device
 
     # 超参用 env 控制，方便 ablation
-    tau_high = float(os.getenv("DEMO_TAU_HIGH", "0.6"))       # base 很自信时的阈值
-    lambda_sim = float(os.getenv("DEMO_LAMBDA_SIM", "0.2"))   # 分布相似度权重
-    gamma = float(os.getenv("DEMO_GAMMA", "5.0"))             # sigmoid 尖锐度
+    tau_high = float(os.getenv("DEMO_TAU_HIGH", "0.3"))       # base 很自信时的阈值
+    lambda_sim = float(os.getenv("DEMO_LAMBDA_SIM", "0.05"))  # 分布相似度权重
+    gamma = float(os.getenv("DEMO_GAMMA", "7.5"))             # sigmoid 尖锐度
 
     # 1) 分别算「无 demo / 有 demo」两套 label logits
     z0 = score_labels_for_messages(
@@ -156,9 +156,8 @@ def demo_contrastive_decode(
         score = delta_c + lambda_sim * sim
         alpha = 1.0 / (1.0 + math.exp(-gamma * score))  # sigmoid
 
-    # 3) 对比式融合 logits：z_final = z0 + α (zD - z0)
-    z_final = z0 + alpha * (zD - z0)
-    p_final = torch.softmax(z_final, dim=-1)
+    # 3) 论文中的概率分布融合：p_final = (1 - alpha) p0 + alpha pD
+    p_final = (1.0 - alpha) * p0 + alpha * pD
     y_final_id = int(p_final.argmax().item())
     y_final = label_space[y_final_id]
 
@@ -173,5 +172,9 @@ def demo_contrastive_decode(
         "alpha": alpha,
         "z0": z0.detach().cpu().tolist(),
         "zD": zD.detach().cpu().tolist(),
+        "p0": p0.detach().cpu().tolist(),
+        "pD": pD.detach().cpu().tolist(),
+        "p_final": p_final.detach().cpu().tolist(),
+        "fusion": "probability",
     }
     return y_final, debug

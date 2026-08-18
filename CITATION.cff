@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite our Pattern Recognition paper."
+title: "Enhancing VLM-based multimodal sentiment analysis via prompt tuning and contrastive decoding"
+type: article
+authors:
+  - family-names: Wang
+    given-names: Xiaowan
+  - family-names: Liu
+    given-names: Yiming
+  - family-names: Chen
+    given-names: Yifeng
+  - family-names: Zhang
+    given-names: Jianxin
+  - family-names: Lu
+    given-names: Xiusheng
+journal: "Pattern Recognition"
+volume: "180"
+article-number: "114624"
+year: 2026
+date-published: 2026-08-12
+doi: "10.1016/j.patcog.2026.114624"
+license: Apache-2.0

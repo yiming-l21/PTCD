@@ -1,263 +1,301 @@
-# VLM-MSA: A VLM-based Multimodal Prompt Learning Framework for Few-shot Sentiment Analysis
+# PTCD: Prompt Tuning and Contrastive Decoding for Multimodal Sentiment Analysis
 
-**VLM‑MSA** is a research framework for **few‑shot multimodal sentiment analysis** (coarse‑grained & fine‑grained). It takes **image + text** as input and predicts sentiment. In few‑shot settings, full finetuning is often sub‑optimal; we instead train **lightweight prompt parameters** and retrieve **in‑context demonstrations** to boost a strong **VLM backend (Qwen2.5‑VL)**.
+Official implementation of the Pattern Recognition paper:
 
----
+**Enhancing VLM-based Multimodal Sentiment Analysis via Prompt Tuning and Contrastive Decoding**
 
-## Key Features
+[Paper](https://doi.org/10.1016/j.patcog.2026.114624) | [Citation](CITATION.cff) | [License](LICENSE)
 
-* ✅ **RAG (Retrieval‑Augmented Generation)**: retrieve demonstrations from the **training split** with offline indices; supports **global**, **balanced**, and **per‑class** modes.
-* ✅ **Soft Visual‑Text Prompts**: learn discrete soft tokens injected into the tokenizer/vocabulary; only update the corresponding embedding rows.
-* 🚧 **Prompt‑as‑Expert (MoE)**: Mixture‑of‑Experts style fusion of diverse prompts (hard/soft, vis‑text). *(Planned)*
-* 🚧 **Contrastive Decoding**: negative candidates / anti‑prompts to sharpen decisions. *(Planned)*
+PTCD is a parameter-efficient framework for few-shot multimodal sentiment analysis. It combines multimodal prompt tuning with retrieval-augmented contrastive decoding: during training, only lightweight textual soft prompts and visual prefix prompts are optimized while the VLM backbone remains frozen; during inference, an adaptive demo-gating mechanism selectively uses informative retrieved demonstrations and suppresses misleading ones.
 
+## Highlights
 
----
+- **Parameter-efficient multimodal adaptation**: freezes Qwen2.5-VL and trains only textual soft prompts and visual prefix prompts.
+- **Textual + visual prompt tuning**: uses 8 textual soft tokens and 16 visual prefix tokens in the paper setting.
+- **Retrieval-augmented contrastive decoding**: compares a base branch and a demonstration-augmented branch at inference time.
+- **Adaptive demo gating**: fuses label distributions with confidence gain and distributional consistency.
+- **Few-shot MSA evaluation**: reports main results on MVSA-S, MVSA-M, Twitter-2015, and Twitter-2017.
 
-## Table of Contents
+## Method
 
-* [Installation](#installation)
-* [Datasets & Labels](#datasets--labels)
-* [Data Preparation (RAG indices)](#data-preparation-rag-indices)
-* [Training: Soft Prompt Tuning](#training-soft-prompt-tuning)
-* [Evaluation / Inference](#evaluation--inference)
-* [RAG Module Details](#rag-module-details)
-* [Templates (Coarse & Fine)](#templates-coarse--fine)
-* [Results](#results)
-* [FAQ](#faq)
-* [License & Citation](#license--citation)
-* [Acknowledgements](#acknowledgements)
+PTCD has two stages.
 
----
+**1. Multimodal Prompt Tuning**
+
+The VLM backbone is frozen. PTCD adds trainable textual soft tokens to the tokenizer/embedding space and visual prefix tokens to the vision stream. Only these prompt parameters are updated, requiring less than 1% of the full model parameters.
+
+**2. Retrieval-Augmented Contrastive Decoding**
+
+At inference time, PTCD builds two branches for each query:
+
+- `base`: prompt-tuned prediction without retrieved demonstrations.
+- `demo`: prompt-tuned prediction with retrieved in-context demonstrations.
+
+The final label distribution is fused as:
+
+```text
+p_final = (1 - alpha) * p0 + alpha * pD
+```
+
+where `alpha` is controlled by confidence gain and distributional consistency. If the base branch is confident but the demo branch predicts a conflicting label, PTCD suppresses the demo influence.
+
+The released defaults match the paper:
+
+```text
+tau_high = 0.3
+gamma = 7.5
+lambda_sim = 0.05
+```
+
+## Results
+
+Main paper results on the 1% few-shot setting:
+
+| Dataset | Accuracy | Macro-F1 | Weighted-F1 |
+| --- | ---: | ---: | ---: |
+| MVSA-S | **72.06** | **61.10** | **71.57** |
+| MVSA-M | **68.56** | **53.05** | **66.16** |
+| Twitter-2015 | **65.96** | **62.64** | **66.35** |
+| Twitter-2017 | **60.78** | **61.27** | **60.72** |
+
+Please refer to the paper for complete baseline comparisons and ablation studies.
 
 ## Installation
-**Pretrained Backends**
 
-* **Qwen2.5‑VL‑7B‑Instruct** (VLM): `Qwen/Qwen2.5-VL-7B-Instruct` or a local path (e.g. `/home/lym/models/qwen2.5_vl`).
-* **Sentence Embedding** model for RAG: `sentence-transformers/sbert-roberta-large` or local path (e.g. `/home/lym/MultiPoint/models/sbert-roberta-large`).
+Create an environment and install the core dependencies:
 
-You can configure paths via environment variables or CLI flags (see below).
+```bash
+conda create -n ptcd python=3.10 -y
+conda activate ptcd
+pip install -r requirements.txt
+```
 
----
+Optional analysis and augmentation tools:
 
-## Datasets & Labels
+```bash
+pip install -r requirements-extra.txt
+```
 
-Supported datasets:
+By default, scripts use the Hugging Face model id:
 
-* **Coarse**: `mvsa-s`, `mvsa-m`, `tumemo`, `tumblr`
-* **Fine (Aspect)**: `t2015`, `t2017`, `masad`
+```text
+Qwen/Qwen2.5-VL-7B-Instruct
+```
 
-Label spaces (examples):
+You can use a local checkpoint instead:
 
-* `mvsa-*`: `negative / neutral / positive`
-* `tumemo`: `angry, bored, calm, fear, happy, love, sad`
-* `masad`: `negative / positive`
-* `t2015 / t2017`: `negative / neutral / positive` (with **aspect**)
+```bash
+export MODEL_NAME=/path/to/Qwen2.5-VL-7B-Instruct
+```
 
-See [`dataset_info.py`](./src/dataset_info.py or similar) for full registry.
+## Data Preparation
 
----
+This repository contains TSV split files used by the code. Dataset images are not redistributed. Please download the images from the official dataset sources and organize them as:
 
-## Data Preparation (RAG indices)
+```text
+datasets/
+├── mvsa-s/
+│   ├── train_few1.tsv
+│   ├── dev_few1.tsv
+│   ├── test.tsv
+│   └── imgs/
+│       └── *.jpg
+├── mvsa-m/
+│   └── ...
+├── t2015/
+│   └── ...
+└── t2017/
+    └── ...
+```
 
-Run **once** under `datasets/` to preprocess TSVs, build text embeddings, and precompute offline top‑k mappings.
+To build JSONL files, sentence embeddings, and offline retrieval indices:
 
 ```bash
 cd datasets
 bash run_data.sh
 ```
 
-`run_data.sh` does the following:
+The default command processes the four paper datasets: `mvsa-s`, `mvsa-m`, `t2015`, and `t2017`.
 
-1. Convert TSV to JSON (`data_tsv2json.py`) for splits: `train_few1`, `dev_few1`, `test`.
-2. Generate text embeddings (`generate.sh`) using your sentence encoder (e.g., SBERT).
-3. Precompute similarity from **test→train/dev** for offline retrieval (`topk.sh` for `val` / `test`).
-
-**Environment / Paths**
-
-* SBERT path example: `/home/lym/MultiPoint/models/sbert-roberta-large`
-* Qwen2.5‑VL path: `/home/lym/models/qwen2.5_vl`
-
----
-
-## Training: Soft Prompt Tuning
-
-Train discrete **soft tokens** (only the corresponding embedding rows are updated). Full model weights are **frozen**.
-
-**One‑liner**
+Useful overrides:
 
 ```bash
-bash train_softprompt.sh
+DATASETS="mvsa-s" bash run_data.sh
+SBERT_MODEL=sentence-transformers/sbert-roberta-large bash generate.sh
+DEMO_EMB_TAG=sbert-roberta-large MODE=test bash topk.sh
 ```
 
-**Script (reference)**
+Generated retrieval files are intentionally ignored by git:
+
+```text
+train_sbert-roberta-large.npy
+test2train_sbert-roberta-large_top10_idx.npy
+test2train_sbert-roberta-large_perclass_top5.npz
+```
+
+## Quick Start
+
+Train the PTCD prompts for one dataset:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
-SP_N_TOKENS=8 \
-python src/prompt_tuning/train_soft_prompt.py \
-  --model "$QWEN_VL" \
-  --data_dir "datasets/mvsa-s" \
-  --img_dir  "datasets/mvsa-s/imgs" \
-  --tsv      "test.tsv" \
-  --train_tsv train_few1.tsv \
-  --dev_tsv   dev_few1.tsv \
-  --dtype bf16 \
-  --min_pixels 224 --max_pixels 1024 \
-  --batch_size 4 \
-  --sp_mode generic \
-  --sp_lr 5e-3 --sp_steps 1000 \
-  --sp_ckpt ./prompt_ckpt.pt
+CUDA_VISIBLE_DEVICES=0 bash scripts/train_ptcd.sh mvsa-s
 ```
 
-Training highlights:
-
-* **Only** the `<soft*>` token rows in the embedding are trained (others frozen).
-* AMP (fp16/bf16) supported; cosine LR with warmup; optional prompt‑dropout & anchor loss.
-* Dev evaluation mimics inference (`generate`) to avoid train/test mismatch.
-
-Artifacts:
-
-* `prompt_ckpt.pt` and `prompt_ckpt.best.pt` contain only `{soft_tokens, soft_vecs}`.
-
----
-
-## Evaluation / Inference
-
-Batch evaluation with (optional) multi‑GPU **DDP** and offline **RAG** demos.
+Evaluate the full PTCD method:
 
 ```bash
-bash run.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/eval_ptcd.sh mvsa-s
 ```
 
-Key envs in `run.sh`:
+The evaluation script enables the paper method by default:
 
-* `USE_DEMO=0|1` — enable/disable RAG demos
-* `DEMO_TOPK` — number of retrieved demos per sample
-* `DEMO_MODE=global|balanced|perclass`
-* `TRAIN_JSONL` — path to `train_few1.json` (used when `USE_DEMO=1`)
-* `SOFT_PROMPT_CKPT` — path to soft‑prompt checkpoint
-
-Outputs:
-
-* Prediction logs and optional raw generations
-* If RAG is on, diagnostics and retrieval stats per sample
-
----
-
-## RAG Module Details
-
-* **Indexing**: offline precomputation of **test→train/dev** nearest neighbors with SBERT embeddings.
-* **Modes**:
-
-  * **global**: top‑K nearest overall
-  * **balanced**: round‑robin from per‑class pools (class balance)
-  * **perclass**: top‑K within each class
-* **Demo formatting**: each retrieved item becomes a `(user, assistant)` pair (image optional), assistant returns `{"label": "<class>"}` as supervision/ICL signal.
-* **Fine‑grained (aspect)**: replace `$T$ / $t$` placeholder with the concrete aspect; optionally include explicit `Aspect:` line in demos.
-
----
-
-## Templates (Coarse & Fine)
-
-Two canonical variants are provided for both **coarse** and **fine** settings. Examples:
-
-* **Coarse**
-
-  * `t1_coarse`: `[CLS] [MASK] ... [SEP]` (+ image in default multimodal)
-  * `t2_coarse`: `Text: "..." Sentiment of text: [MASK]`
-* **Fine (with Aspect)**
-
-  * `t1_fine`: text‑only / default multimodal
-  * `t2_fine`: `Text: "..." Aspect: "..." Sentiment of aspect: [MASK]`
-
-See implementations in `labels_and_templates.py` / `dataset_info.py` and `prompts/`.
-
----
-
-## Results
-
-**Main comparison** (Accuracy / Macro‑F1 / Weighted‑F1). Numbers from your runs; see Feishu for full context.
-
-| dataset                 |    MVSA‑S |           |           |    MVSA‑M |           |           |     MASAD |           |           |
-| ----------------------- | --------: | --------: | --------: | --------: | --------: | --------: | --------: | --------: | --------: |
-| metric                  |       ACC |    MAC‑F1 |    Wtd‑F1 |       ACC |    MAC‑F1 |    Wtd‑F1 |       ACC |    MAC‑F1 |    Wtd‑F1 |
-| **UP‑MPF (T1)**         |     58.21 |     51.08 |     58.49 |     55.97 |     44.63 |     57.79 |     75.82 |     74.63 |     76.19 |
-| **UP‑MPF (T2)**         |     57.77 |     52.10 |     59.74 |     58.10 |     45.29 |     58.50 |     74.85 |     73.73 |     75.24 |
-| **MultiPoint w/o Demo** | **62.25** | **56.07** | **64.37** | **62.81** | **51.52** | **63.05** | **80.39** | **78.27** | **80.20** |
-| **MultiPoint w/ Demo**  |     60.50 |     55.03 |     63.30 |     59.65 |     50.89 |     61.09 |     79.03 |     76.89 |     79.30 |
-| **Zero‑shot MMVLM**     |     56.13 |     50.69 |     59.95 | **63.68** | **52.05** | **64.04** |     77.00 |     71.84 |     75.26 |
-
-| dataset                 | Twitter‑15 |           |           | Twitter‑17 |           |           |    TumEmo |           |           |
-| ----------------------- | ---------: | --------: | --------: | ---------: | --------: | --------: | --------: | --------: | --------: |
-| metric                  |        ACC |    MAC‑F1 |    Wtd‑F1 |        ACC |    MAC‑F1 |    Wtd‑F1 |       ACC |    MAC‑F1 |    Wtd‑F1 |
-| **UP‑MPF (T1)**         |      52.73 |     49.64 |     53.33 |      50.95 |     48.99 |     50.47 |     48.08 |     48.31 |     48.06 |
-| **UP‑MPF (T2)**         |      56.03 |     53.06 |     56.41 |      52.61 |     52.44 |     51.96 |     48.27 |     48.61 |     48.34 |
-| **MultiPoint w/o Demo** |  **61.72** | **60.04** | **62.09** |  **55.59** | **56.08** | **55.09** |     50.70 |     50.51 |     50.56 |
-| **MultiPoint w/ Demo**  |      60.75 |     58.80 |     61.15 |      53.32 |     54.08 |     53.10 | **51.14** | **50.38** | **50.70** |
-| **Zero‑shot MMVLM**     |      51.88 |     52.45 |     49.32 |  **57.78** | **56.50** | **54.17** |     47.56 |     47.70 |     47.67 |
-
-**Prompt variant study (highlights)**
-
-* Variants include `Strict`, `Image First`, `Text First`, `Conflict‑aware`, `Sarcasm/Irony‑aware`, and ensembles (`EN3`, `EN5`).
-* Best variants differ by dataset; e.g., `Text First` often improves on MVSA‑S/M; ensembles provide modest gains without demos.
-
-**Few‑shot k & retrieval mode study**
-
-* Compared **Zero‑shot**, **1/3/5‑shot** baselines (MMVLM) and our **balanced/perclass** retrieval.
-* On MVSA‑S, **2‑shot per‑class** achieves **64.71 ACC / 56.98 MAC‑F1 / 66.48 Wtd‑F1**; trends are similar across datasets.
-
-> Full tables & figures: [https://i0hfv1fsook.feishu.cn/docx/La0rd2WHRoeyXTxTcBjcdobHnJc](https://i0hfv1fsook.feishu.cn/docx/La0rd2WHRoeyXTxTcBjcdobHnJc)
-
----
-
-## Project Structure
-
-```
-VLM-MSA/
-├─ datasets/
-│  ├─ mvsa-s/ mvsa-m/ masad/ t2015/ t2017/ tumemo/
-│  ├─ run_data.sh  data_tsv2json.py  generate.sh  precompute_topk.py  topk.sh  generate_emb.py
-├─ logs/
-│  ├─ logs.py  masad/  mvsa-m/  mvsa-s/  t2015/  t2017/  tumemo/
-├─ src/
-│  ├─ run.py                 # main eval/infer (DDP ready)
-│  ├─ dataset.py             # TSV/JSON readers
-│  ├─ dataset_info.py        # labels & templates registry
-│  ├─ prompts.py             # prompt builders & templates
-│  ├─ retrieve_demo.py       # RAG provider & offline indices
-│  ├─ utils.py               # helpers
-│  ├─ ensemble.py            # voting / ensembling utils
-│  └─ prompt_tuning/
-│     ├─ train_soft_prompt.py
-│     ├─ prompt_learner.py   # SoftPromptLearner
-│     └─ sp_utils.py         # soft token init
-├─ train_softprompt.sh  run.sh  run_prompts.sh  run_ensemble.sh
-├─ prompt_ckpt.pt  prompt_ckpt.best.pt  README.md  requirements.txt
-└─ datasets/ imgs/ etc.
+```text
+USE_DEMO=1
+DEMO_CONTRASTIVE=1
+DEMO_MODE=perclass
+DEMO_TOPK=1
 ```
 
----
+For a prompt-only ablation:
 
-## FAQ
+```bash
+CUDA_VISIBLE_DEVICES=0 bash scripts/eval_prompt_only.sh mvsa-s
+```
 
-**Q1. How are soft prompts trained without touching the full model?**
-We mask gradients to **only** update the embedding rows of `<soft*>` tokens; all other parameters are frozen.
+## Reproducing Paper Results
 
-**Q2. How is RAG different from on‑the‑fly retrieval?**
-We precompute **offline** indices to make evaluation stable and fast; modes `global/balanced/perclass` trade off relevance and class balance.
+Prepare data and retrieval indices:
 
----
+```bash
+cd datasets
+DATASETS="mvsa-s mvsa-m t2015 t2017" bash run_data.sh
+cd ..
+```
 
-## License & Citation
+Train prompts:
 
-* **License**: Apache-2.0
-* **Citation**: (TBD)
+```bash
+for dataset in mvsa-s mvsa-m t2015 t2017; do
+  CUDA_VISIBLE_DEVICES=0 bash scripts/train_ptcd.sh "$dataset"
+done
+```
 
----
+Evaluate PTCD:
+
+```bash
+for dataset in mvsa-s mvsa-m t2015 t2017; do
+  CUDA_VISIBLE_DEVICES=0 bash scripts/eval_ptcd.sh "$dataset"
+done
+```
+
+Outputs are written to:
+
+```text
+outputs/checkpoints/<dataset>/
+logs/<dataset>/predictions.jsonl
+logs/<dataset>/metrics.json
+logs/<dataset>/*_cd_debug.jsonl
+```
+
+## Configuration
+
+Paper reproduction configs are under:
+
+```text
+configs/paper/
+├── mvsa-s.json
+├── mvsa-m.json
+├── t2015.json
+└── t2017.json
+```
+
+These configs keep the paper defaults explicit:
+
+| Setting | Value |
+| --- | --- |
+| Backbone | Qwen2.5-VL-7B |
+| Textual soft tokens | 8 |
+| Visual prefix tokens | 16 |
+| Training steps | 1500 |
+| Batch size | 4 |
+| Warmup | 200 steps |
+| Precision | BF16 |
+| Visual prompt LR | 0.3 x textual prompt LR |
+| Gradient checkpointing | Disabled by default |
+| Demo gating | Probability-level fusion |
+
+Common environment variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL_NAME` | `Qwen/Qwen2.5-VL-7B-Instruct` | VLM backbone id or local path |
+| `DATA_ROOT` | `<repo>/datasets` | Dataset root |
+| `OUTPUT_DIR` | `<repo>/outputs` | Prompt checkpoints and training logs |
+| `SOFT_PROMPT_CKPT` | auto-detected | Prompt checkpoint for evaluation |
+| `SBERT_MODEL` | `sentence-transformers/sbert-roberta-large` | Sentence encoder for retrieval |
+| `DEMO_EMB_TAG` | `sbert-roberta-large` | Retrieval embedding filename tag |
+| `USE_DEMO` | `1` in `eval_ptcd.sh` | Enable retrieved demonstrations |
+| `DEMO_CONTRASTIVE` | `1` in `eval_ptcd.sh` | Enable contrastive demo gating |
+
+## Repository Structure
+
+```text
+PTCD/
+├── configs/
+│   ├── paper/                    # paper reproduction configs
+│   └── *.json                    # compatibility and additional dataset configs
+├── datasets/
+│   ├── data_tsv2json.py
+│   ├── generate_emb.py
+│   ├── precompute_topk.py
+│   ├── run_data.sh
+│   └── <dataset>/*.tsv
+├── logs/
+│   ├── logs.py
+│   └── analyze_logs.py
+├── scripts/
+│   ├── train_ptcd.sh             # prompt tuning
+│   ├── eval_ptcd.sh              # full PTCD evaluation
+│   └── eval_prompt_only.sh        # ablation
+├── src/
+│   ├── run.py                    # inference and evaluation
+│   ├── contrastive_decode.py     # retrieval-augmented contrastive decoding
+│   ├── retrieve_demo.py          # offline retrieval demo provider
+│   ├── prompts.py                # instruction templates
+│   ├── dataset.py
+│   ├── dataset_info.py
+│   └── prompt_tuning/
+│       ├── train_soft_prompt.py
+│       ├── prompt_learner.py
+│       └── sp_utils.py
+├── requirements.txt
+├── requirements-extra.txt
+├── CITATION.cff
+└── LICENSE
+```
+
+## Additional Dataset Support
+
+The codebase also contains experimental support for MASAD and TumEmo. These datasets are kept for research convenience but are not part of the main paper evaluation.
+
+## Citation
+
+```bibtex
+@article{wang2026ptcd,
+  title = {Enhancing VLM-based multimodal sentiment analysis via prompt tuning and contrastive decoding},
+  author = {Wang, Xiaowan and Liu, Yiming and Chen, Yifeng and Zhang, Jianxin and Lu, Xiusheng},
+  journal = {Pattern Recognition},
+  volume = {180},
+  pages = {114624},
+  year = {2026},
+  doi = {10.1016/j.patcog.2026.114624}
+}
+```
 
 ## Acknowledgements
 
-* **Qwen2.5‑VL‑7B‑Instruct** as the VLM backbone.
-* **SBERT (RoBERTa‑large)** for sentence embeddings.
-* Datasets: **MVSA‑S/M**, **MASAD**, **Twitter 2015/2017 (ABSA)**, **TUMEMO**.
+This project builds on Qwen2.5-VL and sentence-transformer retrieval models. We thank the creators of MVSA-S, MVSA-M, Twitter-2015, and Twitter-2017 for providing the benchmark datasets used in the paper.
+
+## License
+
+This repository is released under the Apache License 2.0. Dataset files and images remain subject to their original licenses and terms of use.

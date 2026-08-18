@@ -145,9 +145,9 @@ def main():
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map=device
     )
-    ratio4dataset={"t2017": 0.4, "t2015":0.3, "tumemo":0.7, "masad":0.9 }
-    # if dataset_name in ["t2017", "tumemo", "t2015"]:
-    enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.5))
+    if int(os.getenv("ENABLE_GRADIENT_CHECKPOINTING", "0")) > 0:
+        ratio4dataset = {"t2017": 0.4, "t2015": 0.3, "tumemo": 0.7, "masad": 0.9}
+        enable_gc_for_last_ratio(model, ratio=ratio4dataset.get(dataset_name, 0.5))
     print("model dtype", model.dtype)
     gpu_mem_snapshot(prefix="[after load ] ")
 
@@ -156,13 +156,13 @@ def main():
     )
 
     # 初始化文本软提示
-    n_text_sp = int(os.getenv("SP_N_TOKENS", "16"))
+    n_text_sp = int(os.getenv("SP_N_TOKENS", str(getattr(args, "sp_n_tokens", 8))))
     soft_tokens, soft_ids = init_soft_tokens(processor.tokenizer, model, n_text_sp)
     print(f"[*] 文本软提示: {soft_tokens} (数量: {n_text_sp})")
 
     # 视觉配置
     use_image = (args.img_dir is not None) and (not args.no_img)
-    n_visual_sp = int(os.getenv("VISUAL_SP_N_TOKENS", "8"))
+    n_visual_sp = int(os.getenv("VISUAL_SP_N_TOKENS", str(getattr(args, "sp_vtokens", 16))))
     print(f"[*] 视觉软提示数量: {n_visual_sp} (使用图像: {use_image})")
 
     has_aspect = getattr(

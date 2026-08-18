@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=2,4,5,6,7
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
 detect_gpus() {
@@ -29,6 +29,8 @@ export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}"
+DATA_ROOT="${DATA_ROOT:-datasets}"
 DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
 VARIANTS=("IMAGE_FIRST" "TEXT_FIRST" "CONFLICT_AWARE" "SARCASM_AWARE" "STRICT")
 
@@ -37,17 +39,17 @@ for dataset in "${DATASETS[@]}"; do
     for variant in "${VARIANTS[@]}"; do
       export PROMPT_VARIANT="${variant}"
       python src/run.py \
-          --data_dir "datasets/${dataset}" \
-          --img_dir "datasets/${dataset}/imgs" \
+          --data_dir "${DATA_ROOT}/${dataset}" \
+          --img_dir "${DATA_ROOT}/${dataset}/imgs" \
           --tsv "test.tsv" \
           --labels "positive,neutral,negative" \
-          --model "/home/lym/models/qwen2.5_vl" \
+          --model "${MODEL_NAME}" \
           --dtype "bf16" \
           --attn_impl "sdpa" \
           --lang "en" \
           --max_new_tokens 16 \
           --distributed \
-          --dump_raw \
+          --dump_raw
 
       echo "dataset ${dataset} processed."
       echo "----------------------------------------"

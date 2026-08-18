@@ -403,6 +403,8 @@ def ddp_worker(rank: int, world_size: int, args_dict: dict):
     set_seed(args.seed + (rank if is_dist else 0))
 
     # 是否启用 demo 级对比解码 & target_mode
+    os.environ.setdefault("SP_N_TOKENS", str(getattr(args, "sp_n_tokens", 8)))
+    os.environ.setdefault("VISUAL_SP_N_TOKENS", str(getattr(args, "sp_vtokens", 16)))
     use_demo_contrastive = int(os.getenv("DEMO_CONTRASTIVE", "0")) > 0
     target_mode_env = os.getenv("TARGET_MODE", "token")
 

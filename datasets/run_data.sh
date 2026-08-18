@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATASETS=(mvsa-s mvsa-m masad t2015 t2017 tumemo)
-SPLITS=(train_few1 dev_few1 test)
+# Paper datasets by default. Add experimental datasets with:
+# DATASETS="mvsa-s mvsa-m t2015 t2017 masad tumemo" bash run_data.sh
+read -r -a DATASETS_ARR <<< "${DATASETS:-mvsa-s mvsa-m t2015 t2017}"
+read -r -a SPLITS_ARR <<< "${SPLITS:-train_few1 dev_few1 test}"
 
-for dataset in "${DATASETS[@]}"; do
-  for split in "${SPLITS[@]}"; do
+for dataset in "${DATASETS_ARR[@]}"; do
+  for split in "${SPLITS_ARR[@]}"; do
     echo "start processing dataset: ${dataset}, split: ${split}"
-    export DATASET_NAME="${dataset}"
-    export SPLIT="${split}"
-    python data_tsv2json.py
+    DATASET_NAME="${dataset}" SPLIT="${split}" python data_tsv2json.py
   done
-  echo "dataset ${dataset} processed."
+  echo "dataset ${dataset} json conversion done."
   echo "----------------------------------------"
 done
 
-for dataset in "${DATASETS[@]}"; do
-  export DATASET_NAME="$dataset"
-  echo "===start generate embedding for ${DATASET_NAME}==="
-  bash generate.sh
+for dataset in "${DATASETS_ARR[@]}"; do
+  echo "=== start generate embedding for ${dataset} ==="
+  DATASET_NAME="${dataset}" bash generate.sh
 done
 
-for dataset in "${DATASETS[@]}"; do
-  export DATASET_NAME="$dataset"
-  echo "===start precompute topk for ${DATASET_NAME}==="
+for dataset in "${DATASETS_ARR[@]}"; do
+  echo "=== start precompute topk for ${dataset} ==="
   for mode in val test; do
-    export MODE="$mode"
-    bash topk.sh
+    DATASET_NAME="${dataset}" MODE="${mode}" bash topk.sh
   done
 done

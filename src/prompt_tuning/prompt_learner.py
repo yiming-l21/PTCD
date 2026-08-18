@@ -513,8 +513,8 @@ class VisualPrompt:
 class TrainCfg:
     lr: float = 1e-4
     weight_decay: float = 0.01
-    max_steps: int = 1000
-    grad_accum: int = 8
+    max_steps: int = 1500
+    grad_accum: int = 1
     log_every: int = 50
     save_ckpt: str = "prompt_ckpt/final.pt"
     use_fp16: bool = True

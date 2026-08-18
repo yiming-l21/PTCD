@@ -21,9 +21,9 @@ def _write_rag_debug_and_stats(
     summary_path = logs_dir / f"{pred_field}_cd_summary.json"
 
     # === 读取 gating 超参（用于 summary 和日后筛选） ===
-    tau_high = float(os.getenv("DEMO_TAU_HIGH", "0.6"))
-    lambda_sim = float(os.getenv("DEMO_LAMBDA_SIM", "0.2"))
-    gamma = float(os.getenv("DEMO_GAMMA", "5.0"))
+    tau_high = float(os.getenv("DEMO_TAU_HIGH", "0.3"))
+    lambda_sim = float(os.getenv("DEMO_LAMBDA_SIM", "0.05"))
+    gamma = float(os.getenv("DEMO_GAMMA", "7.5"))
 
     # === 写 JSONL：每行 = 一个样本的完整诊断信息 ===
     with dbg_path.open("w", encoding="utf-8") as f:
@@ -56,6 +56,10 @@ def _write_rag_debug_and_stats(
 
                 "z0": diag.get("z0", None),
                 "zD": diag.get("zD", None),
+                "p0": diag.get("p0", None),
+                "pD": diag.get("pD", None),
+                "p_final": diag.get("p_final", None),
+                "fusion": diag.get("fusion", "probability"),
 
                 # RAG demos 信息（可选）
                 "demos": diag.get("rag", {}).get("demos", diag.get("demos", [])),

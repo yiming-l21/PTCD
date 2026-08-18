@@ -27,7 +27,7 @@ def read_jsonl(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--jsonl", required=True, help="JSONL 文件路径（每行一个样本）")
-    parser.add_argument("--data_dir", required=True, help="保存 .npy 的目录（比如 /home/lym/MultiPoint/datasets/mvsa-s）")
+    parser.add_argument("--data_dir", required=True, help="Directory used to save .npy embeddings, e.g. datasets/mvsa-s")
     parser.add_argument("--split", required=True, choices=["train","val","test"], help="当前生成哪个 split 的向量")
     parser.add_argument("--model_tag", default="sbert-roberta-large", help="命名到文件名中的模型短名，如 sbert-roberta-large")
     parser.add_argument("--hf_model", default="usc-isi/sbert-roberta-large-anli-mnli-snli", help="HuggingFace sentence-transformers 模型名")

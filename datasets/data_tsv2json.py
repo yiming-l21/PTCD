@@ -135,9 +135,11 @@ def main():
     split = os.getenv("SPLIT", "train").strip().lower()
     mode = dataset_mode(dataset_name)
 
-    image_base = Path(f"/home/lym/VLM-MSA/datasets/{dataset_name}/imgs")
-    tsv = Path(f"/home/lym/VLM-MSA/datasets/{dataset_name}/{split}.tsv")
-    out = Path(f"/home/lym/VLM-MSA/datasets/{dataset_name}/{split}.json")
+    repo_root = Path(__file__).resolve().parent.parent
+    data_root = Path(os.getenv("DATA_ROOT", repo_root / "datasets"))
+    image_base = data_root / dataset_name / "imgs"
+    tsv = data_root / dataset_name / f"{split}.tsv"
+    out = data_root / dataset_name / f"{split}.json"
     print(f"[*] dataset={dataset_name} mode={mode}")
     print(f"[*] tsv={tsv}")
     print(f"[*] out={out}")

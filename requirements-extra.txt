@@ -1,0 +1,2 @@
+matplotlib>=3.7
+modelscope>=1.14

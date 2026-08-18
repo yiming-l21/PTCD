@@ -25,7 +25,7 @@ def build_args():
     p.add_argument('--max_new_tokens', type=int, default=16, help='生成最大新token数')
     p.add_argument('--temperature', type=float, default=0.0, help='生成温度（0为确定性）')
     p.add_argument('--top_p', type=float, default=1.0, help='top-p采样参数')
-    p.add_argument('--batch_size', type=int, default=16, help='训练/推理批次大小')
+    p.add_argument('--batch_size', type=int, default=4, help='训练/推理批次大小')
     p.add_argument('--seed', type=int, default=34, help='随机种子（保证可复现）')
     p.add_argument('--no_img', action='store_true', help='强制不使用图像（即使提供 img_dir）')
     p.add_argument('--distributed', action='store_true', help='Enable multi-GPU DDP')
@@ -35,16 +35,16 @@ def build_args():
     p.add_argument('--template_id', type=int, default=2, help='数据集模板ID（与dataset_info.py对应）')
 
     # ===== soft-prompt 核心配置 =====
-    p.add_argument('--sp_n_tokens', type=int, default=16, help='可学习文本软提示token个数')
+    p.add_argument('--sp_n_tokens', type=int, default=8, help='可学习文本软提示token个数')
     p.add_argument('--sp_mode', type=str, default='combined', choices=['generic','class_specific','combined'])
     p.add_argument('--sp_lambda', type=float, default=0.5, help='combined 模式下的 λ')
     p.add_argument('--sp_per_tpl', action='store_true', help='是否为每个模板维护独立 prompt 头')
-    p.add_argument('--sp_vtokens', type=int, default=8, help='视觉软提示token个数（>0 则启用视觉前缀）')
+    p.add_argument('--sp_vtokens', type=int, default=16, help='视觉软提示token个数（>0 则启用视觉前缀）')
     p.add_argument('--visual_sp_dropout', type=float, default=0.1, help='视觉软提示dropout概率（训练时生效）')
 
     # ===== sp trainer 训练配置 =====
-    p.add_argument('--sp_lr', type=float, default=3e-4, help='文本软提示学习率（视觉自动为1.5倍）')
-    p.add_argument('--sp_steps', type=int, default=1000, help='最大训练步数')
+    p.add_argument('--sp_lr', type=float, default=1e-4, help='文本软提示学习率（视觉自动为0.3倍）')
+    p.add_argument('--sp_steps', type=int, default=1500, help='最大训练步数')
     p.add_argument('--sp_accum', type=int, default=1, help='梯度累积步数')
     p.add_argument('--sp_warmup', type=int, default=200, help='学习率热身步数（总步数的10%-20%）')
     p.add_argument('--sp_ckpt', type=str, default='prompt_ckpt.pt', help='最终checkpoint保存路径')

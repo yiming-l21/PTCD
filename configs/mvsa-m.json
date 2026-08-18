@@ -1,11 +1,10 @@
 {
-  "cuda": "5",
   "nproc": 1,
   "batch_size": 4,
   "sp_lr": 1e-4,
-  "sp_steps": 1000,
+  "sp_steps": 1500,
   "sp_accum": 2,
-  "sp_warmup": 100,
+  "sp_warmup": 200,
   "template_id": 2,
   "sp_dropout": 0.2,
   "visual_sp_dropout": 0.05,
@@ -17,7 +16,7 @@
   "demo_topk": 1,
   "demo_mode": "perclass",
   "train_tsv": "train_few1.tsv",
-  "dev_tsv": "test.tsv",
+  "dev_tsv": "dev_few1.tsv",
   "test_tsv": "test.tsv",
-  "train_jsonl": "/home/lym/VLM-MSA/datasets/mvsa-m/train_few1.json"
+  "train_jsonl": "datasets/mvsa-m/train_few1.json"
 }

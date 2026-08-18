@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CUDA_VISIBLE_DEVICES=2,4,5,6,7
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 : "${CUDA_VISIBLE_DEVICES:=}"
 
 detect_gpus() {
@@ -31,7 +31,8 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 
 # ---- paths & defaults (按需修改) ----
-MODEL_DIR="${MODEL_DIR:-/home/lym/models/qwen2.5_vl}"
+MODEL_DIR="${MODEL_DIR:-${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}}"
+DATA_ROOT="${DATA_ROOT:-datasets}"
 DTYPE="${DTYPE:-bf16}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-16}"
@@ -44,7 +45,7 @@ run_one() {
   local run_suffix="$2"
   local mode="$3"   # STRICT | ENS3 | ENS5
 
-  local data_dir="datasets/${dataset}"
+  local data_dir="${DATA_ROOT}/${dataset}"
   local img_opt=()
   if [[ -d "${data_dir}/imgs" ]]; then
     img_opt+=(--img_dir "${data_dir}/imgs")
