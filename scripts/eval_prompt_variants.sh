@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PTCD_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 : "${CUDA_VISIBLE_DEVICES:=}" 
 
@@ -30,15 +32,17 @@ export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=0
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}"
-DATA_ROOT="${DATA_ROOT:-datasets}"
+DATA_ROOT="${DATA_ROOT:-${PTCD_ROOT}/datasets}"
 DATASETS=("mvsa-s" "mvsa-m" "masad" "t2015" "t2017" "tumemo")
 VARIANTS=("IMAGE_FIRST" "TEXT_FIRST" "CONFLICT_AWARE" "SARCASM_AWARE" "STRICT")
+
+cd "${PTCD_ROOT}"
 
 for dataset in "${DATASETS[@]}"; do
     echo "start processing dataset: ${dataset}"
     for variant in "${VARIANTS[@]}"; do
       export PROMPT_VARIANT="${variant}"
-      python src/run.py \
+      python -m src.cli.run \
           --data_dir "${DATA_ROOT}/${dataset}" \
           --img_dir "${DATA_ROOT}/${dataset}/imgs" \
           --tsv "test.tsv" \

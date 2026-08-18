@@ -10,7 +10,7 @@ import sys
 parent = Path(__file__).resolve().parent.parent
 if str(parent) not in sys.path:
     sys.path.insert(0, str(parent))
-from src.dataset_info import get_labels_and_template
+from src.data.dataset_info import get_labels_and_template
 # ---------------- Defaults ----------------
 DEFAULT_CLASS_MAP: dict[str, list[str]] = {
     # coarse-grained

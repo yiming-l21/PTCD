@@ -6,7 +6,7 @@ import math
 
 import torch
 
-from src.infer import prepare_inputs_from_messages, prompt_eval_guards
+from src.inference.infer import prepare_inputs_from_messages, prompt_eval_guards
 
 
 @torch.inference_mode()

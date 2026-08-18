@@ -4,7 +4,7 @@ from typing import List, Tuple, Optional,Dict, Any
 import numpy as np
 import json
 import os
-from utils import _to_jsonable
+from src.common.utils import _to_jsonable
 COARSE = "coarse"
 FINE   = "fine"
 

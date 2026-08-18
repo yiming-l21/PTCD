@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel, AutoProcessor
-from infer import (
+from src.inference.infer import (
     filter_to_gen_allow, generate_scores_argmax, prompt_eval_guards, set_strict_greedy_generation
 )
 
@@ -925,7 +925,7 @@ class SoftPromptLearner:
         max_new_tokens: int = 32,
     ):
         import time, numpy as np
-        from utils import parse_label_from_output
+        from src.common.utils import parse_label_from_output
 
         self.model.eval()
         set_strict_greedy_generation(self.model)

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Space-separated dataset list, e.g.:
-# DATASETS="mvsa-s mvsa-m t2015 t2017" bash train_softprompt_batch.sh
+# DATASETS="mvsa-s mvsa-m t2015 t2017" bash scripts/train_ptcd_batch.sh
 read -r -a DATASETS_ARR <<< "${DATASETS:-mvsa-s mvsa-m t2015 t2017}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -28,7 +28,7 @@ while [[ "${idx}" -lt "${#DATASETS_ARR[@]}" ]]; do
     fi
     dataset="${DATASETS_ARR[$idx]}"
     echo "[INFO] launch dataset=${dataset} on visible GPU id ${gpu}"
-    CUDA_VISIBLE_DEVICES="${gpu}" bash "${SCRIPT_DIR}/scripts/train_ptcd.sh" "${dataset}" &
+    CUDA_VISIBLE_DEVICES="${gpu}" bash "${SCRIPT_DIR}/train_ptcd.sh" "${dataset}" &
     pids+=("$!")
     idx=$((idx + 1))
   done

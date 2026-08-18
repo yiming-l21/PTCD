@@ -267,15 +267,18 @@ PTCD/
 │   └── analyze_logs.py
 ├── scripts/
 │   ├── train_ptcd.sh             # prompt tuning
+│   ├── train_ptcd_batch.sh       # batch prompt tuning
 │   ├── eval_ptcd.sh              # full PTCD evaluation
-│   └── eval_prompt_only.sh        # ablation
+│   ├── eval_prompt_only.sh        # ablation
+│   ├── eval_prompt_variants.sh    # prompt variant ablations
+│   └── eval_prompt_ensemble.sh    # prompt ensemble ablations
 ├── src/
-│   ├── run.py                    # inference and evaluation
-│   ├── contrastive_decode.py     # retrieval-augmented contrastive decoding
-│   ├── retrieve_demo.py          # offline retrieval demo provider
-│   ├── prompts.py                # instruction templates
-│   ├── dataset.py
-│   ├── dataset_info.py
+│   ├── cli/
+│   │   └── run.py                # inference and evaluation entry point
+│   ├── common/                   # args, metrics helpers, shared utilities
+│   ├── data/                     # datasets, label spaces, retrieval demos
+│   ├── inference/                # generation and contrastive decoding
+│   ├── prompting/                # instruction templates
 │   └── prompt_tuning/
 │       ├── train_soft_prompt.py
 │       ├── prompt_learner.py

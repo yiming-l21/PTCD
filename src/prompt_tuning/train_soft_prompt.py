@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations 
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(__file__))) 
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-from dataset import MSADataset
-from dataset_info import get_labels_and_template
-from params import build_args, resolve_paths
-from prompts import build_user_content, build_prompt_variant, build_instruction
-from retrieve_demo import DemoProvider
-from utils import set_seed, build_msgs, parse_label_from_output
-from prompt_tuning.prompt_learner import SoftPromptLearner, TrainCfg
-from sp_utils import init_soft_tokens, init_visual_soft_tokens, gpu_mem_snapshot, gpu_mem_reset_peak
+from src.data.dataset import MSADataset
+from src.data.dataset_info import get_labels_and_template
+from src.common.params import build_args, resolve_paths
+from src.prompting.prompts import build_user_content, build_prompt_variant, build_instruction
+from src.data.retrieve_demo import DemoProvider
+from src.common.utils import set_seed, build_msgs, parse_label_from_output
+from src.prompt_tuning.prompt_learner import SoftPromptLearner, TrainCfg
+from src.prompt_tuning.sp_utils import init_soft_tokens, init_visual_soft_tokens, gpu_mem_snapshot, gpu_mem_reset_peak
 def collate(
     samples,
     processor,

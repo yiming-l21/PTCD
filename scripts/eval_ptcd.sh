@@ -89,7 +89,7 @@ echo "[INFO] soft_prompt=${SOFT_PROMPT_CKPT}"
 echo "[INFO] demo=${USE_DEMO} mode=${DEMO_MODE} topk=${DEMO_TOPK} contrastive=${DEMO_CONTRASTIVE}"
 echo "[INFO] gating tau_high=${DEMO_TAU_HIGH} gamma=${DEMO_GAMMA} lambda_sim=${DEMO_LAMBDA_SIM}"
 
-python src/run.py \
+python -m src.cli.run \
   --data_dir "${DATA_ROOT}/${DATASET}" \
   --img_dir "${DATA_ROOT}/${DATASET}/imgs" \
   --tsv "${TEST_TSV}" \

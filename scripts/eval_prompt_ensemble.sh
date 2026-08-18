@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PTCD_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 : "${CUDA_VISIBLE_DEVICES:=}"
 
@@ -32,7 +34,7 @@ export NCCL_P2P_DISABLE=0
 
 # ---- paths & defaults (按需修改) ----
 MODEL_DIR="${MODEL_DIR:-${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}}"
-DATA_ROOT="${DATA_ROOT:-datasets}"
+DATA_ROOT="${DATA_ROOT:-${PTCD_ROOT}/datasets}"
 DTYPE="${DTYPE:-bf16}"
 ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-16}"
@@ -79,15 +81,15 @@ PY
   case "${mode}" in
     STRICT)
       env ${envs} PROMPT_VARIANT="STRICT" \
-        python src/run.py "${common_args[@]}" "${img_opt[@]}"
+        python -m src.cli.run "${common_args[@]}" "${img_opt[@]}"
       ;;
     ENS3)
       env ${envs} PROMPT_ENSEMBLE="STRICT,IMAGE_FIRST,TEXT_FIRST" \
-        python src/run.py "${common_args[@]}" "${img_opt[@]}"
+        python -m src.cli.run "${common_args[@]}" "${img_opt[@]}"
       ;;
     ENS5)
       env ${envs} PROMPT_ENSEMBLE="STRICT,IMAGE_FIRST,TEXT_FIRST,CONFLICT_AWARE,SARCASM_AWARE" \
-        python src/run.py "${common_args[@]}" "${img_opt[@]}"
+        python -m src.cli.run "${common_args[@]}" "${img_opt[@]}"
       ;;
     *)
       echo "[ERR] unknown mode=${mode}" >&2
@@ -96,6 +98,8 @@ PY
   esac
 }
 
+
+cd "${PTCD_ROOT}"
 
 for dataset in "${DATASETS[@]}"; do
   echo "========================================"

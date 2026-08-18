@@ -53,7 +53,7 @@ echo "[INFO] data_root=${DATA_ROOT}"
 echo "[INFO] checkpoint_dir=${CKPT_DIR}"
 echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
-python src/prompt_tuning/train_soft_prompt.py \
+python -m src.prompt_tuning.train_soft_prompt \
   --model "${MODEL_NAME}" \
   --data_dir "${DATA_ROOT}/${DATASET}" \
   --img_dir "${DATA_ROOT}/${DATASET}/imgs" \

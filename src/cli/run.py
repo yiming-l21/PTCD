@@ -2,7 +2,6 @@
 import os
 import re
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(__file__))) 
 
 import json
 import time
@@ -11,7 +10,6 @@ import socket
 from time import monotonic
 from pathlib import Path
 from typing import List, Tuple
-from ensemble import _majority_vote
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -19,25 +17,25 @@ import torch.multiprocessing as mp
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from qwen_vl_utils import process_vision_info
 
-from src.params import build_args, resolve_paths
-from src.dataset import MSADataset
-from src.prompts import build_instruction, build_user_content, build_prompt_variant
-from src.dataset_info import get_labels_and_template
-from src.utils import (
+from src.common.params import build_args, resolve_paths
+from src.data.dataset import MSADataset
+from src.prompting.prompts import build_instruction, build_user_content, build_prompt_variant
+from src.data.dataset_info import get_labels_and_template
+from src.common.utils import (
     set_seed,
     load_model_and_processor,
     parse_label_from_output,
     infer_with_variants,
     build_msgs,        # 新增：用于构造 base/demo 两套 messages
 )
-from src.retrieve_demo import DemoProvider
+from src.data.retrieve_demo import DemoProvider
 from src.prompt_tuning.prompt_learner import load_prompt_ckpt
-from src.contrastive_decode import demo_contrastive_decode   # 新增：demo 级对比解码
+from src.inference.contrastive_decode import demo_contrastive_decode   # 新增：demo 级对比解码
 from logs.logs import _finalize_and_save, _resolve_pred_field, _write_rag_debug_and_stats
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from transformers.utils import logging as hf_logging  # noqa: E402
-from src.infer import (
+from src.inference.infer import (
     prepare_inputs_from_messages,
     filter_to_gen_allow,
     generate_scores_argmax,

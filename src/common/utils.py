@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import List
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 from typing import List, Dict, Any, Tuple, Optional
-from prompts import build_instruction
-from ensemble import _majority_vote
+from src.prompting.prompts import build_instruction
+from src.common.ensemble import _majority_vote
 from qwen_vl_utils import process_vision_info
-from prompt_tuning.sp_utils import init_soft_tokens
+from src.prompt_tuning.sp_utils import init_soft_tokens
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
